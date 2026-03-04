@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "intercomm": {
+      "command": "node",
+      "args": ["dist/mcp-entry.js"]
+    }
+  }
+}

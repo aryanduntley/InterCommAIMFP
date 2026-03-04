@@ -1,0 +1,31 @@
+{
+  "name": "intercomm-aifp",
+  "version": "0.2.0",
+  "description": "Local intercommunication system for coordinating multiple Claude Code instances via SQLite",
+  "type": "module",
+  "main": "dist/cli.js",
+  "bin": {
+    "intercomm": "dist/cli.js",
+    "intercomm-mcp": "dist/mcp-entry.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "claude",
+    "ipc",
+    "coordination"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.3.3",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "better-sqlite3": "^12.6.2",
+    "zod": "^4.3.6"
+  }
+}
