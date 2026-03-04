@@ -3,8 +3,6 @@
 export type Role = "master" | "worker";
 
 export type MessageType =
-  | "identity-request"
-  | "identity-response"
   | "task"
   | "status"
   | "question"
@@ -18,6 +16,7 @@ export type Instance = {
   readonly active: boolean;
   readonly lastActive: number;
   readonly registeredAt: number;
+  readonly sessionId: string;
 };
 
 export type Message = {
@@ -41,6 +40,7 @@ export type InstanceRow = {
   active: number;
   last_active: number;
   registered_at: number;
+  session_id: string;
 };
 
 export type MessageRow = {
@@ -64,6 +64,7 @@ export const instanceFromRow = (row: InstanceRow): Instance => ({
   active: row.active === 1,
   lastActive: row.last_active,
   registeredAt: row.registered_at,
+  sessionId: row.session_id,
 });
 
 export const messageFromRow = (row: MessageRow): Message => ({

@@ -1,83 +1,85 @@
 # InterComm AIFP — Multi-Instance Coordination Protocol
 
-You have InterComm tools for coordinating with other Claude Code instances working on the same project. All communication goes through a shared SQLite database — no servers, no HTTP.
+You have InterComm tools for coordinating with other Claude Code instances working on the same project. All communication goes through a shared SQLite database. The master instance controls workers via tmux — no polling required.
+
+**Requires tmux.** The master pushes prompts to workers via `tmux send-keys`. Workers never poll — they act when woken.
 
 ---
 
-## Tool Reference
+## Tool Reference (7 tools)
 
-### Bootstrap Tools (call in order at startup)
+### Registration
 
-- **`intercomm_init`** — Creates `.intercomm-aifp/` directory and database. Called automatically when the MCP server starts. You do not need to call this manually.
+- **`intercomm_register(role?)`** — Register this instance. Pass `role: "master"` to become the coordinator, or omit / pass `"worker"` to auto-assign as the lowest available `worker-N`. Initializes the DB if needed. Each instance calls this exactly once at startup.
 
-- **`intercomm_request_identity`** — Announces you need a role assignment. Inserts an `identity-request` message addressed to all. Returns a temporary ID (e.g., `pending-a1b2c3d4`) and a request ID. Use the request ID when polling for a response.
+### Communication
 
-- **`intercomm_poll(type)`** — Checks for new messages of a specific type addressed to you. During startup, call with `type: "identity-response"` to wait for the master to assign your name. Does not update your read cursor (it's a peek, not a consume).
+- **`intercomm_send(to, message, type?)`** — Send a direct message to a specific peer by ID. Default type: `"status"`. Requires registration.
 
-- **`intercomm_assume_master`** — Claims the master role. Only succeeds if no active master exists (last active within 30 seconds). Deactivates ALL other instances and registers you as `master`. Call this only after polling has timed out.
+- **`intercomm_broadcast(message, type?)`** — Send a message to all registered peers. Default type: `"announce"`. Requires registration.
 
-- **`intercomm_assign_identity(request_id)`** — Master-only. Takes the message ID of an `identity-request` and assigns the pending instance the lowest available `worker-N` name. Sends an `identity-response` message back.
+- **`intercomm_read(all?)`** — Read ALL new messages addressed to you (direct + broadcast) since your last read. Updates your read cursor. Set `all: true` to re-read everything from the beginning.
 
-### Communication Tools
+### Management
 
-- **`intercomm_send(to, message, type?)`** — Sends a direct message to a specific peer by ID. Default type: `"status"`. Requires you to be registered.
+- **`intercomm_status`** — Shows all registered instances with their role, active/inactive status, session ID, and last active time.
 
-- **`intercomm_broadcast(message, type?)`** — Sends a message to all registered peers. Default type: `"announce"`. Requires you to be registered.
-
-- **`intercomm_read(all?)`** — Reads ALL new messages addressed to you (direct + broadcast) since your last read. Updates your read cursor. Set `all: true` to re-read everything from the beginning.
-
-### Management Tools
-
-- **`intercomm_status`** — Shows all registered instances with their role, active/inactive status, and last active time. Useful for confirming your identity and seeing who's online.
+- **`intercomm_signoff`** — Cleanly deactivate this instance before shutting down. Sets active = 0 and clears server state.
 
 - **`intercomm_clear(keep?)`** — Master-only. Deletes old messages, keeping the most recent `keep` (default: 100).
 
 ---
 
-## Startup Sequence
+## Startup
 
-Follow this decision tree exactly:
+**One step:** Call `intercomm_register(role)`.
 
-```
-1. Call intercomm_request_identity
-   → You get a temp ID and a request ID.
-
-2. Poll for identity assignment:
-   Call intercomm_poll(type: "identity-response") every 5 seconds.
-
-3. Did you receive an identity-response?
-   ├─ YES → You are now registered as the assigned worker name (e.g., worker-1).
-   │        Proceed to normal operation.
-   │
-   └─ NO (30 seconds elapsed, no response) →
-            Call intercomm_assume_master.
-            ├─ SUCCESS → You are master. Proceed to master behavior.
-            └─ FAILURE → Another master became active while you waited.
-                         Go back to step 2 and keep polling.
-
-4. Call intercomm_status to confirm your identity and see active peers.
-```
-
-**Important:** Do NOT skip the polling phase. Always try to get assigned by an existing master before claiming master yourself.
+- The **user** decides which instance is master. The master instance calls `intercomm_register(role: "master")`.
+- All other instances call `intercomm_register()` (defaults to worker). They receive an auto-assigned name like `worker-1`, `worker-2`, etc.
+- After registering, call `intercomm_status` to confirm your identity and see active peers.
 
 ---
 
-## Polling Rules
+## tmux Integration
 
-### When to call `intercomm_read`:
-- **Every 3–5 conversational turns** during normal work
-- **Immediately after completing any task or subtask**
-- **Before starting new work** (check for new assignments or priority changes)
-- **After sending a question** — poll until you get an answer
+Workers run in tmux sessions. The master controls them directly via bash:
 
-### When to call `intercomm_poll`:
-- **During startup only** — to wait for `identity-response`
-- **When waiting for a specific message type** and you don't want to advance your read cursor
+### Discovering workers
+```bash
+# List all tmux sessions
+tmux list-sessions
+# List all panes across sessions
+tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_current_command}'
+```
 
-### Frequency guidelines:
-- During active work: read every 3–5 turns
-- When idle or waiting: poll every 5–10 seconds
-- After finishing a task: read immediately, then report `done`
+### Waking a worker
+```bash
+# Send a prompt to a worker in a specific tmux pane
+# IMPORTANT: Send an extra Enter to ensure the prompt is submitted in Claude Code
+tmux send-keys -t <session>:<window>.<pane> "Your instruction here" Enter Enter
+```
+
+### Checking worker output
+```bash
+# Read the last N lines from a worker's pane
+tmux capture-pane -t <session>:<window>.<pane> -p | tail -20
+```
+
+**Workers do NOT poll.** They sit idle until the master pushes a prompt via `tmux send-keys`. This eliminates wasted tool calls from polling loops.
+
+---
+
+## Role Enforcement
+
+**Critical: If you are registered as a worker, you MUST NOT attempt any master-role actions.** Specifically, workers must:
+- **Never** interact with the user directly — all communication goes through InterComm to the master
+- **Never** delegate tasks to other workers
+- **Never** use `tmux send-keys` to control other instances
+- **Never** use `intercomm_clear` (master-only)
+- **Never** call `intercomm_register(role: "master")` unless the master has been stale for 30+ seconds
+- **Only** do their assigned task, report progress, ask questions via InterComm, and signal completion
+
+Workers are subordinates. They execute, report, and stop. The master is the sole coordinator.
 
 ---
 
@@ -85,8 +87,6 @@ Follow this decision tree exactly:
 
 | Type | When to Use |
 |---|---|
-| `identity-request` | Automatically sent by `intercomm_request_identity`. Do not send manually. |
-| `identity-response` | Automatically sent by `intercomm_assign_identity`. Do not send manually. |
 | `task` | Master sends to assign work. Include clear scope and acceptance criteria. |
 | `status` | Report progress at meaningful milestones. Keep it concise: what you did, what's next. |
 | `question` | When you're blocked and need input. State what you need and from whom. |
@@ -98,56 +98,61 @@ Follow this decision tree exactly:
 
 ## Master Behavior
 
-As master, you coordinate all other instances:
+As master, you are the only instance the user interacts with. You coordinate workers via InterComm messages + tmux.
 
-1. **Assign identities.** When `intercomm_read` shows `identity-request` messages, call `intercomm_assign_identity` with the request's message ID. Do this promptly — new instances are waiting.
+### Worker availability
 
-2. **Delegate work.** Use `intercomm_send(to, message, type: "task")` to assign specific tasks to workers. Be explicit about scope, files, and acceptance criteria.
+The user will either:
+- Tell you: "I have N tmux instances available for you"
+- Or you ask: "I need N workers for this task — please spin up N tmux sessions with Claude Code"
 
-3. **Monitor progress.** Read regularly for `status` and `done` messages. Track which workers are working on what.
+### Delegation flow
 
-4. **Answer questions.** When you see `question` messages, respond with `intercomm_send(to, message, type: "answer")`. Workers may be blocked waiting.
+1. **Record the task.** Use `intercomm_send(to, message, type: "task")` to write the assignment to the DB.
+2. **Wake the worker.** Use `tmux send-keys -t <pane> "instruction" Enter` to prompt the worker to register (if new) and read its task.
+3. **Monitor.** Check worker output via `tmux capture-pane` or read InterComm messages via `intercomm_read`.
+4. **Answer questions.** When you see `question` messages, respond with `intercomm_send(to, message, type: "answer")` and wake the worker via tmux.
+5. **Broadcast coordination.** Use `intercomm_broadcast` for information that affects all workers.
+6. **Housekeeping.** Call `intercomm_clear` periodically to keep the message table bounded.
 
-5. **Broadcast coordination.** Use `intercomm_broadcast` for information that affects everyone (architecture changes, priority shifts, shared decisions).
+### Waking a new worker (full sequence)
 
-6. **Housekeeping.** Call `intercomm_clear` periodically to keep the message table from growing unbounded.
+```bash
+# 1. Send registration + task read instruction
+# IMPORTANT: Always send an extra Enter to ensure the prompt is submitted in Claude Code
+tmux send-keys -t 1:0.0 "You are part of an InterComm coordination system. Register as a worker by calling intercomm_register(). After registering, call intercomm_read() to get your task. Do NOT ask the user anything - all communication goes through InterComm to the master." Enter Enter
+```
+
+Then separately record the task in the DB so the worker picks it up on `intercomm_read`:
+```
+intercomm_send(to: "worker-1", message: "task details...", type: "task")
+```
 
 ---
 
 ## Worker Behavior
 
-As a worker, you execute tasks and report back:
+As a worker, you execute tasks and report back. **You operate autonomously — do NOT ask the user for input or confirmation. All communication goes through InterComm to the master. The user interacts only with the master instance.**
 
-1. **Check for tasks.** After registration, call `intercomm_read` to see if the master has already assigned you work.
+1. **Register.** Call `intercomm_register()` when prompted by the master via tmux.
+2. **Read your task.** Call `intercomm_read` to get your assignment.
+3. **Acknowledge.** Send a `status` message confirming you've started: `intercomm_send(to: "master", message: "Starting on X", type: "status")`.
+4. **Do the work.** Execute the task autonomously. No need to poll — just work.
+5. **Ask when blocked.** Send a `question` to the master via InterComm: `intercomm_send(to: "master", message: "question", type: "question")`. Then wait — the master will wake you via tmux when the answer is ready.
+6. **Signal completion.** Send `intercomm_send(to: "master", message: "summary of work done", type: "done")`.
+7. **Stop.** After sending `done`, do nothing. The master will wake you via tmux if there's more work.
 
-2. **Acknowledge tasks.** When you receive a `task`, send a `status` message confirming you've started: `intercomm_send(to: "master", message: "Starting on X", type: "status")`.
-
-3. **Report progress.** At meaningful milestones (not every line of code), send `status` updates. Include what you completed and what's next.
-
-4. **Ask when blocked.** If you need information or a decision, send a `question` to the master. Then poll `intercomm_read` for the `answer` before proceeding.
-
-5. **Signal completion.** When your task is done, send: `intercomm_send(to: "master", message: "summary of work done", type: "done")`.
-
-6. **Stay responsive.** Read messages every 3–5 turns. The master may reassign priorities or broadcast important changes.
+**Do NOT poll `intercomm_read` in a loop. Do NOT ask the user anything. Just work, report, and stop.**
 
 ---
 
 ## Edge Cases
 
 ### Master dies or goes stale
-- If you're a worker and the master hasn't been active for 30+ seconds (visible via `intercomm_status`), you may call `intercomm_assume_master` to take over.
-- The new master should call `intercomm_status` to see remaining active workers and `intercomm_read` to catch up on recent messages.
+- If you're a worker and the master hasn't been active for 30+ seconds (visible via `intercomm_status`), you may call `intercomm_register(role: "master")` to take over. This deactivates all other instances.
 
 ### Question goes unanswered
-- If you sent a `question` and get no `answer` after 30 seconds, check `intercomm_status` to see if the recipient is still active.
-- If they're stale, try broadcasting the question or proceeding with your best judgment and noting the assumption.
+- If you sent a `question` and the master doesn't wake you with an answer within a reasonable time, the master may be busy. Wait — do not poll.
 
 ### You're the only instance
-- If `intercomm_status` shows only you, work normally. You're both master and sole worker.
-- Still read periodically — a new instance may join at any time.
-
-### Worker name reuse
-- When `intercomm_assign_identity` picks a name, it reuses the lowest inactive `worker-N` slot. Worker names are not permanently consumed.
-
-### Multiple identity requests at once
-- Master should process `identity-request` messages one at a time via `intercomm_assign_identity`. Each call picks the next available name automatically.
+- If `intercomm_status` shows only you, work normally as both master and sole worker.

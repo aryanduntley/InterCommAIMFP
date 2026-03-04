@@ -55,14 +55,16 @@ const cmdStatus = (): void => {
   }
 };
 
-const cmdAssumeMaster = (): void => {
+const cmdRegister = (args: ParsedArgs): void => {
   initDb(getRoot());
-  const result = store.assumeMaster();
-  if (!result.success) {
-    console.error(`Error: ${result.error}`);
+  const role = (args.positional[0] as "master" | "worker") ?? "worker";
+  if (role !== "master" && role !== "worker") {
+    console.error("Usage: intercomm register [master|worker]");
     process.exit(1);
   }
-  console.log("You are now the master.");
+  const sessionId = `cli-${Date.now()}`;
+  const instance = store.registerAs(role, sessionId);
+  console.log(`Registered as "${instance.id}" (${instance.role})`);
 };
 
 const cmdSend = (args: ParsedArgs): void => {
@@ -132,7 +134,7 @@ const USAGE = `InterComm AIFP — Debug CLI
 Commands:
   init                                    Initialize DB
   status                                  Show all instances
-  assume-master                           Become master
+  register [master|worker]                Register as master or worker (default: worker)
   send --from <id> <to> <message> [--type <type>]   Send a direct message
   broadcast --from <id> <message> [--type <type>]    Broadcast to all
   read --id <id> [--all]                  Read new messages
@@ -146,7 +148,7 @@ Message types: task, status, question, answer, announce, done
 const commands: Readonly<Record<string, (args: ParsedArgs) => void>> = {
   init: cmdInit,
   status: cmdStatus,
-  "assume-master": cmdAssumeMaster,
+  register: cmdRegister,
   send: cmdSend,
   broadcast: cmdBroadcast,
   read: cmdRead,

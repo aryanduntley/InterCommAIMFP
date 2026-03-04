@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS instances (
   role TEXT NOT NULL CHECK(role IN ('master', 'worker')),
   active INTEGER NOT NULL DEFAULT 1,
   last_active INTEGER NOT NULL,
-  registered_at INTEGER NOT NULL
+  registered_at INTEGER NOT NULL,
+  session_id TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -22,7 +23,6 @@ CREATE TABLE IF NOT EXISTS messages (
   from_id TEXT NOT NULL,
   to_id TEXT NOT NULL,
   type TEXT NOT NULL CHECK(type IN (
-    'identity-request', 'identity-response',
     'task', 'status', 'question', 'answer', 'announce', 'done'
   )),
   content TEXT NOT NULL,
@@ -36,6 +36,15 @@ CREATE TABLE IF NOT EXISTS read_cursors (
 );
 `;
 
+// Migration for existing DBs that lack session_id column
+const migrateSchema = (database: DatabaseType): void => {
+  const columns = database.prepare("PRAGMA table_info(instances)").all() as { name: string }[];
+  const hasSessionId = columns.some((col) => col.name === "session_id");
+  if (!hasSessionId) {
+    database.exec("ALTER TABLE instances ADD COLUMN session_id TEXT NOT NULL DEFAULT ''");
+  }
+};
+
 export const initDb = (root: string): DatabaseType => {
   if (db) return db;
 
@@ -45,6 +54,7 @@ export const initDb = (root: string): DatabaseType => {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.exec(SCHEMA);
+  migrateSchema(db);
   return db;
 };
 

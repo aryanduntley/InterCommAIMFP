@@ -13,7 +13,7 @@ import type {
 } from "./types.js";
 import { instanceFromRow, messageFromRow } from "./types.js";
 import { STALE_THRESHOLD_MS } from "./config.js";
-import { execute, queryOne, queryAll, getDb } from "./db.js";
+import { execute, queryOne, queryAll } from "./db.js";
 
 // --- Pure helpers ---
 
@@ -23,12 +23,12 @@ export const isStale = (lastActive: number, now: number = nowMs()): boolean =>
   now - lastActive > STALE_THRESHOLD_MS;
 
 export const formatMessageForDisplay = (msg: Message): string =>
-  `[${new Date(msg.ts).toLocaleTimeString()}] (${msg.type}) ${msg.fromId} → ${msg.toId}: ${msg.content}`;
+  `[${new Date(msg.ts).toLocaleTimeString()}] (${msg.type}) ${msg.fromId} → ${msg.toId}: ${msg.content} [msg_id: ${msg.id}]`;
 
 export const formatInstanceForDisplay = (inst: Instance): string => {
   const status = inst.active && !isStale(inst.lastActive) ? "active" : "inactive";
   const seen = new Date(inst.lastActive).toLocaleTimeString();
-  return `  ${inst.id} [${inst.role}] — ${status} (last active: ${seen})`;
+  return `  ${inst.id} [${inst.role}] — ${status} (last active: ${seen}, session: ${inst.sessionId.slice(0, 8)})`;
 };
 
 export const findLowestAvailableWorkerName = (instances: readonly Instance[]): string => {
@@ -48,17 +48,18 @@ export const findLowestAvailableWorkerName = (instances: readonly Instance[]): s
 
 // --- IO: Instance operations ---
 
-export const registerInstance = (id: string, role: Role): Instance => {
+export const registerInstance = (id: string, role: Role, sessionId: string): Instance => {
   const now = nowMs();
   execute(
-    `INSERT OR REPLACE INTO instances (id, role, active, last_active, registered_at)
-     VALUES (?, ?, 1, ?, ?)`,
+    `INSERT OR REPLACE INTO instances (id, role, active, last_active, registered_at, session_id)
+     VALUES (?, ?, 1, ?, ?, ?)`,
     id,
     role,
     now,
     now,
+    sessionId,
   );
-  return { id, role, active: true, lastActive: now, registeredAt: now };
+  return { id, role, active: true, lastActive: now, registeredAt: now, sessionId };
 };
 
 export const touchInstance = (id: string): void => {
@@ -92,6 +93,22 @@ export const getActiveMaster = (): Instance | undefined => {
     now - STALE_THRESHOLD_MS,
   );
   return row ? instanceFromRow(row) : undefined;
+};
+
+// --- IO: Registration ---
+
+export const registerAs = (
+  role: Role,
+  sessionId: string,
+): Instance => {
+  if (role === "master") {
+    deactivateAll();
+    return registerInstance("master", "master", sessionId);
+  }
+
+  const allInstances = getAllInstances();
+  const workerName = findLowestAvailableWorkerName(allInstances);
+  return registerInstance(workerName, "worker", sessionId);
 };
 
 // --- IO: Message operations ---
@@ -152,31 +169,6 @@ export const readNewMessages = (
   return rows.map(messageFromRow);
 };
 
-export const pollByType = (
-  instanceId: string,
-  type: MessageType,
-): readonly Message[] => {
-  const cursor = queryOne<CursorRow>(
-    `SELECT * FROM read_cursors WHERE instance_id = ?`,
-    instanceId,
-  )?.last_read_ts ?? 0;
-
-  const rows = queryAll<MessageRow>(
-    `SELECT * FROM messages
-     WHERE (to_id = ? OR to_id = 'all')
-       AND type = ?
-       AND ts > ?
-     ORDER BY ts`,
-    instanceId,
-    type,
-    cursor,
-  );
-
-  // Don't update cursor — poll is a peek for a specific type
-  touchInstance(instanceId);
-  return rows.map(messageFromRow);
-};
-
 export const clearOldMessages = (keep: number): number => {
   // Count total messages
   const countRow = queryOne<{ cnt: number }>(`SELECT COUNT(*) as cnt FROM messages`);
@@ -191,60 +183,4 @@ export const clearOldMessages = (keep: number): number => {
     toDelete,
   );
   return toDelete;
-};
-
-// --- IO: Identity negotiation ---
-
-export const createIdentityRequest = (): Message => {
-  // Use a temp ID until master assigns one
-  const tempId = `pending-${randomUUID().slice(0, 8)}`;
-  const msg = insertMessage(tempId, "all", "identity-request", tempId);
-  return msg;
-};
-
-export const assignIdentity = (requestId: string): { assignedId: string; message: Message } | { error: string } => {
-  // Find the identity-request message
-  const requestRow = queryOne<MessageRow>(
-    `SELECT * FROM messages WHERE id = ? AND type = 'identity-request'`,
-    requestId,
-  );
-  if (!requestRow) return { error: `No identity-request found with id "${requestId}"` };
-
-  const pendingId = requestRow.from_id;
-
-  // Find the lowest available worker name
-  const allInstances = getAllInstances();
-  const assignedId = findLowestAvailableWorkerName(allInstances);
-
-  // Register the new worker
-  registerInstance(assignedId, "worker");
-
-  // Send identity-response back, addressed to the pending ID
-  const response = insertMessage("master", pendingId, "identity-response", assignedId);
-
-  return { assignedId, message: response };
-};
-
-export const assumeMaster = (): { success: true; instance: Instance } | { success: false; error: string } => {
-  const existing = getActiveMaster();
-  if (existing) {
-    return { success: false, error: `Active master "${existing.id}" already exists (last active: ${new Date(existing.lastActive).toLocaleTimeString()})` };
-  }
-
-  // Set all instances inactive, then register self as master
-  deactivateAll();
-  const instance = registerInstance("master", "master");
-  return { success: true, instance };
-};
-
-// --- IO: Identity polling (for pending instances) ---
-
-export const pollIdentityResponse = (requestId: string): Message | undefined => {
-  const row = queryOne<MessageRow>(
-    `SELECT m.* FROM messages m
-     WHERE m.type = 'identity-response'
-       AND m.to_id = (SELECT from_id FROM messages WHERE id = ?)`,
-    requestId,
-  );
-  return row ? messageFromRow(row) : undefined;
 };

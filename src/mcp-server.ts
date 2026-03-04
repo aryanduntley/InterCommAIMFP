@@ -1,11 +1,12 @@
-// MCP server — 10 tool handlers (bootstrap + communication + management)
+// MCP server — 6 tool handlers (register + communication + management)
 // Auto-init DB at server startup
 
+import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { MessageType } from "./types.js";
+import type { MessageType, Role } from "./types.js";
 import { initDb, closeDb } from "./db.js";
 import * as store from "./store.js";
 
@@ -14,13 +15,13 @@ import * as store from "./store.js";
 type ServerState = {
   identity: { id: string; role: string } | null;
   root: string;
-  pendingRequestId: string | null;
+  sessionId: string;
 };
 
 const createState = (root: string): ServerState => ({
   identity: null,
   root,
-  pendingRequestId: null,
+  sessionId: randomUUID(),
 });
 
 // --- Result helpers ---
@@ -35,23 +36,12 @@ const errorResult = (text: string): CallToolResult => ({
 });
 
 const requireIdentity = (state: ServerState): CallToolResult | null => {
-  if (!state.identity) return errorResult("Not registered. Complete the startup sequence first.");
+  if (!state.identity) return errorResult("Not registered. Call intercomm_register first.");
   store.touchInstance(state.identity.id);
   return null;
 };
 
-// --- Message type enums for zod ---
-
-const MESSAGE_TYPES = [
-  "identity-request",
-  "identity-response",
-  "task",
-  "status",
-  "question",
-  "answer",
-  "announce",
-  "done",
-] as const;
+// --- Message type enum for zod ---
 
 const SEND_TYPES = [
   "task",
@@ -62,76 +52,25 @@ const SEND_TYPES = [
   "done",
 ] as const;
 
-// --- Handlers: Bootstrap ---
+// --- Handlers ---
 
-const handleInit = (state: ServerState): CallToolResult => {
+const handleRegister = (
+  state: ServerState,
+  args: { role: Role },
+): CallToolResult => {
   initDb(state.root);
-  return textResult("InterComm initialized. DB ready.");
-};
 
-const handleRequestIdentity = (state: ServerState): CallToolResult => {
-  const msg = store.createIdentityRequest();
-  state.pendingRequestId = msg.id;
+  if (state.identity) {
+    return errorResult(`Already registered as "${state.identity.id}" (${state.identity.role}). Restart to re-register.`);
+  }
+
+  const instance = store.registerAs(args.role, state.sessionId);
+  state.identity = { id: instance.id, role: instance.role };
+
   return textResult(
-    `Identity requested. Your temp ID is "${msg.fromId}". ` +
-    `Poll with intercomm_poll(type: "identity-response") to wait for assignment. ` +
-    `Request ID: ${msg.id}`,
+    `Registered as "${instance.id}" (${instance.role}). Session: ${state.sessionId.slice(0, 8)}`,
   );
 };
-
-const handlePoll = (
-  state: ServerState,
-  args: { type: MessageType },
-): CallToolResult => {
-  // Identity polling: check for response to our pending request
-  if (state.pendingRequestId && args.type === "identity-response") {
-    const response = store.pollIdentityResponse(state.pendingRequestId);
-    if (response) {
-      const assignedId = response.content;
-      state.identity = { id: assignedId, role: "worker" };
-      state.pendingRequestId = null;
-      return textResult(`Identity assigned: "${assignedId}" (worker). You are now registered.`);
-    }
-    return textResult("No identity response yet. Keep polling.");
-  }
-
-  // General poll for a specific message type
-  if (!state.identity) {
-    return textResult("No identity set and no pending request. Call intercomm_request_identity first.");
-  }
-
-  const messages = store.pollByType(state.identity.id, args.type);
-  if (messages.length === 0) return textResult(`No new ${args.type} messages.`);
-
-  const lines = [
-    `--- ${messages.length} ${args.type} message(s) ---`,
-    ...messages.map(store.formatMessageForDisplay),
-  ];
-  return textResult(lines.join("\n"));
-};
-
-const handleAssumeMaster = (state: ServerState): CallToolResult => {
-  const result = store.assumeMaster();
-  if (!result.success) return errorResult(result.error);
-  state.identity = { id: "master", role: "master" };
-  return textResult("You are now the master. All other instances set to inactive.");
-};
-
-const handleAssignIdentity = (
-  state: ServerState,
-  args: { request_id: string },
-): CallToolResult => {
-  const err = requireIdentity(state);
-  if (err) return err;
-  if (state.identity!.role !== "master") return errorResult("Only master can assign identities.");
-
-  const result = store.assignIdentity(args.request_id);
-  if ("error" in result) return errorResult(result.error);
-
-  return textResult(`Assigned "${result.assignedId}" to pending instance. Response sent.`);
-};
-
-// --- Handlers: Communication ---
 
 const handleSend = (
   state: ServerState,
@@ -175,8 +114,6 @@ const handleRead = (
   return textResult(lines.join("\n"));
 };
 
-// --- Handlers: Management ---
-
 const handleStatus = (state: ServerState): CallToolResult => {
   const instances = store.getAllInstances();
   if (instances.length === 0) return textResult("No instances registered.");
@@ -188,6 +125,18 @@ const handleStatus = (state: ServerState): CallToolResult => {
     ...instances.map(store.formatInstanceForDisplay),
   ];
   return textResult(lines.join("\n"));
+};
+
+const handleSignoff = (
+  state: ServerState,
+): CallToolResult => {
+  const err = requireIdentity(state);
+  if (err) return err;
+
+  const id = state.identity!.id;
+  store.deactivateInstance(id);
+  state.identity = null;
+  return textResult(`Signed off "${id}". Instance deactivated.`);
 };
 
 const handleClear = (
@@ -205,34 +154,13 @@ const handleClear = (
 // --- Tool registration ---
 
 const registerTools = (server: McpServer, state: ServerState): void => {
-  // Bootstrap tools
-  server.registerTool("intercomm_init", {
-    description: "Create .intercomm-aifp/ and DB if not exists. Called automatically at server start.",
-  }, () => handleInit(state));
-
-  server.registerTool("intercomm_request_identity", {
-    description: "New instance announces it needs a name. Inserts an identity-request message. Returns a temp request ID to poll with.",
-  }, () => handleRequestIdentity(state));
-
-  server.registerTool("intercomm_poll", {
-    description: "Check for messages of a specific type addressed to you. Used to wait for identity assignment, task responses, etc.",
+  server.registerTool("intercomm_register", {
+    description: "Register this instance as master or worker. Initializes DB if needed. Master deactivates all existing instances. Worker auto-assigns lowest available worker-N name. Default role: worker.",
     inputSchema: {
-      type: z.enum(MESSAGE_TYPES).describe("Message type to poll for"),
+      role: z.enum(["master", "worker"]).default("worker").describe("Role to register as (default: worker)"),
     },
-  }, (args) => handlePoll(state, args as { type: MessageType }));
+  }, (args) => handleRegister(state, args as { role: Role }));
 
-  server.registerTool("intercomm_assume_master", {
-    description: "No active master responded? Claim master role. Sets ALL instances to active=0, then registers self as master active=1. Only valid if no active master exists (enforced).",
-  }, () => handleAssumeMaster(state));
-
-  server.registerTool("intercomm_assign_identity", {
-    description: "Master-only. Assigns a worker name to a pending instance. Finds lowest available worker-N (reuses inactive slots). Sends identity-response message back.",
-    inputSchema: {
-      request_id: z.string().describe("The identity-request message ID"),
-    },
-  }, (args) => handleAssignIdentity(state, args as { request_id: string }));
-
-  // Communication tools
   server.registerTool("intercomm_send", {
     description: "Send a direct message to a specific peer.",
     inputSchema: {
@@ -257,10 +185,13 @@ const registerTools = (server: McpServer, state: ServerState): void => {
     },
   }, (args) => handleRead(state, args as { all: boolean }));
 
-  // Management tools
   server.registerTool("intercomm_status", {
     description: "Show all instances: id, role, active, last_active.",
   }, () => handleStatus(state));
+
+  server.registerTool("intercomm_signoff", {
+    description: "Cleanly deactivate this instance and sign off. Use before shutting down.",
+  }, () => handleSignoff(state));
 
   server.registerTool("intercomm_clear", {
     description: "Delete messages older than threshold. Master-only.",
@@ -280,7 +211,7 @@ export const createAndRunServer = async (root: string): Promise<void> => {
 
   const server = new McpServer({
     name: "intercomm-aifp",
-    version: "0.2.0",
+    version: "0.3.0",
   });
 
   registerTools(server, state);
