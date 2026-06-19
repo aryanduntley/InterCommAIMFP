@@ -1,4 +1,4 @@
-// Data contracts for InterComm AIFP
+// Data contracts for InterComm AIMFP
 
 export type Role = "master" | "worker";
 

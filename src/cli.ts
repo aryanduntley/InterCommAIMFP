@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// CLI entry point — debug-only interface for InterComm AIFP
+// CLI entry point — debug-only interface for InterComm AIMFP
 
 import type { ParsedArgs, MessageType } from "./types.js";
 import { initDb, closeDb } from "./db.js";
@@ -39,7 +39,7 @@ const getRoot = (): string => process.cwd();
 
 const cmdInit = (): void => {
   initDb(getRoot());
-  console.log("InterComm AIFP initialized. DB ready.");
+  console.log("InterComm AIMFP initialized. DB ready.");
 };
 
 const cmdStatus = (): void => {
@@ -129,7 +129,7 @@ const cmdClear = (args: ParsedArgs): void => {
   console.log(`Cleared ${deleted} old messages (kept last ${keep}).`);
 };
 
-const USAGE = `InterComm AIFP — Debug CLI
+const USAGE = `InterComm AIMFP — Debug CLI
 
 Commands:
   init                                    Initialize DB

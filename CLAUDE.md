@@ -1,22 +1,22 @@
-# InterComm AIFP — Development Guidelines
+# InterComm AIMFP — Development Guidelines
 
 ## Project Purpose
 
-InterComm AIFP is a local-only intercommunication system that enables multiple Claude Code instances to coordinate in real time while working on the same project. The master instance controls workers via tmux — pushing prompts directly instead of workers polling. All state is stored in a single SQLite database — no servers, no HTTP, no sockets.
+InterComm AIMFP is a local-only intercommunication system that enables multiple Claude Code instances to coordinate in real time while working on the same project. The master instance controls workers via tmux — pushing prompts directly instead of workers polling. All state is stored in a single SQLite database — no servers, no HTTP, no sockets.
 
 **Requires tmux.** Workers run in tmux sessions. The master wakes them via `tmux send-keys`.
 
 ## Architecture
 
 ```
-InterCommAIFP/              # Distributable folder
+intercommAIMFP/              # Distributable folder
   dist/                     # Compiled JS
   src/                      # TypeScript source
   system-prompt.md          # Instructions for user's Claude system prompt
   package.json
   README.md
 
-.intercomm-aifp/            # Runtime data (created by master in project dir)
+.intercomm-aimfp/            # Runtime data (created by master in project dir)
   intercomm.db              # SQLite (WAL mode) — all state + messages
 ```
 

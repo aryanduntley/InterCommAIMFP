@@ -1,5 +1,5 @@
 {
-  "name": "intercomm-aifp",
+  "name": "intercomm-aimfp",
   "version": "0.2.0",
   "description": "Local intercommunication system for coordinating multiple Claude Code instances via SQLite",
   "type": "module",

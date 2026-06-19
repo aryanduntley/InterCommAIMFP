@@ -1,4 +1,4 @@
-# InterComm AIFP
+# InterComm AIMFP
 
 Local-only coordination system for multiple Claude Code instances working on the same project. One instance is master, the rest are workers. The master delegates tasks and controls workers via tmux. All state lives in a single SQLite database — no servers, no HTTP, no sockets.
 
@@ -14,7 +14,7 @@ Local-only coordination system for multiple Claude Code instances working on the
 │    ├── tmux send-keys ──→ Worker-2 (tmux session)   │
 │    └── tmux send-keys ──→ Worker-N (tmux session)   │
 │                                                     │
-│  All instances share: .intercomm-aifp/intercomm.db  │
+│  All instances share: .intercomm-aimfp/intercomm.db  │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -26,11 +26,11 @@ Local-only coordination system for multiple Claude Code instances working on the
 
 ## Install
 
-1. Copy the `InterCommAIFP/` folder somewhere permanent on your machine.
+1. Copy the `intercommAIMFP/` folder somewhere permanent on your machine.
 
 2. Install dependencies and build:
    ```bash
-   cd /path/to/InterCommAIFP
+   cd /path/to/intercommAIMFP
    npm install
    npm run build
    ```
@@ -41,12 +41,12 @@ Local-only coordination system for multiple Claude Code instances working on the
      "mcpServers": {
        "intercomm": {
          "command": "node",
-         "args": ["/absolute/path/to/InterCommAIFP/dist/mcp-entry.js"]
+         "args": ["/absolute/path/to/intercommAIMFP/dist/mcp-entry.js"]
        }
      }
    }
    ```
-   Replace `/absolute/path/to/InterCommAIFP` with the actual path on your machine.
+   Replace `/absolute/path/to/intercommAIMFP` with the actual path on your machine.
 
 4. Add the contents of `system-prompt.md` to each Claude Code instance's system prompt (paste it into your Claude settings or CLAUDE.md).
 
@@ -108,11 +108,37 @@ The master handles everything: task delegation, monitoring progress (via `tmux c
 
 ## Storage
 
-All state is stored in `.intercomm-aifp/intercomm.db` (SQLite, WAL mode) created in the project root. Three tables: `instances`, `messages`, `read_cursors`.
+All state is stored in `.intercomm-aimfp/intercomm.db` (SQLite, WAL mode) created in the project root. Three tables: `instances`, `messages`, `read_cursors`.
 
 ## Stale Detection
 
 Every tool call updates the instance's `last_active` timestamp. An instance is considered stale after **30 seconds** of inactivity. If the master goes stale, a worker can claim master via `intercomm_register(role: "master")`.
+
+## Troubleshooting
+
+### MCP server fails to start after a Node.js upgrade
+
+`better-sqlite3` is a native (C++) addon compiled against a specific Node.js ABI. If you upgrade Node.js (via `nvm`, a system update, etc.), the prebuilt binary no longer loads and the MCP server exits immediately on startup — so every tool call fails. The give-away error (visible by running the entry point directly) looks like:
+
+```
+The module '.../better-sqlite3/build/Release/better_sqlite3.node'
+was compiled against a different Node.js version using
+NODE_MODULE_VERSION 131. This version of Node.js requires
+NODE_MODULE_VERSION 137.
+```
+
+**Fix:** rebuild the native module against your current Node.js:
+
+```bash
+cd /path/to/intercommAIMFP
+npm rebuild better-sqlite3   # or: npm install
+```
+
+To diagnose MCP startup failures in general, run the entry point manually and watch stderr:
+
+```bash
+node dist/mcp-entry.js   # prints "InterComm AIMFP MCP server error: ..." on failure
+```
 
 ## Known Limitations
 

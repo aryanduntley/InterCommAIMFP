@@ -1,4 +1,4 @@
-# InterComm AIFP — Multi-Instance Coordination Protocol
+# InterComm AIMFP — Multi-Instance Coordination Protocol
 
 You have InterComm tools for coordinating with other Claude Code instances working on the same project. All communication goes through a shared SQLite database. The master instance controls workers via tmux — no polling required.
 

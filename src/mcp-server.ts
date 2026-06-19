@@ -210,7 +210,7 @@ export const createAndRunServer = async (root: string): Promise<void> => {
   initDb(root);
 
   const server = new McpServer({
-    name: "intercomm-aifp",
+    name: "intercomm-aimfp",
     version: "0.3.0",
   });
 

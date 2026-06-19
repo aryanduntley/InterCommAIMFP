@@ -2,7 +2,7 @@
 
 import { join } from "node:path";
 
-const BASE_DIR_NAME = ".intercomm-aifp";
+const BASE_DIR_NAME = ".intercomm-aimfp";
 const DB_FILE_NAME = "intercomm.db";
 
 export const STALE_THRESHOLD_MS = 30_000;
