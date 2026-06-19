@@ -80,6 +80,11 @@ src/
   cli.ts            # CLI entry point — debug-only interface
   mcp-server.ts     # MCP server — 7 tool handlers, auto-init
   mcp-entry.ts      # MCP STDIO entry point (shebang, no console.log)
+
+scripts/            # tmux automation (bash) — master-run, not part of the TS build
+  spawn-workers.sh  # Spawn N worker tmux sessions, launch Claude, auto-wake/register
+  scan-workers.sh   # Poll worker panes; flag any blocked on a permission dialog
+  kill-workers.sh   # Tear down worker tmux sessions
 ```
 
 - Each file has a single responsibility.
@@ -145,7 +150,7 @@ This eliminates wasted tool calls from polling loops.
 
 As master, you are the only instance the user interacts with:
 
-1. **Negotiate workers.** The user tells you how many tmux sessions are available, or you ask the user to spin up N sessions for a task.
+1. **Spawn workers.** Decide how many workers the task needs and run `scripts/spawn-workers.sh <N>` (register as master first). The script creates the tmux sessions, launches Claude Code, and auto-wakes each worker to register and report its `session ↔ worker-N` mapping. Use `scripts/scan-workers.sh` to spot workers blocked on permission prompts and approve via `tmux send-keys -t <session> "1" Enter`; tear down with `scripts/kill-workers.sh`.
 2. **Delegate work.** Write the task to the DB via `intercomm_send`, then wake the worker via `tmux send-keys`.
 3. **Monitor progress.** Check worker output via `tmux capture-pane -t <pane> -p | tail -20` or read InterComm messages via `intercomm_read`.
 4. **Answer questions.** When you see `question` messages, respond via `intercomm_send` and wake the worker via tmux.

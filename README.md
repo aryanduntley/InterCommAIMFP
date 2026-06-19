@@ -52,36 +52,61 @@ Local-only coordination system for multiple Claude Code instances working on the
 
 ## Usage
 
-### 1. Start tmux sessions
+The master spawns and controls workers itself — no manual tmux setup required. The helper scripts live in `scripts/`.
 
-Open a terminal and create tmux sessions for your workers:
+### 1. Register the master
+
+In your main Claude Code instance, register as master (via the `intercomm_register(role: "master")` tool, or just tell it "you are the master"). This must happen **before** spawning workers, so workers can message `master` on startup.
+
+### 2. Spawn workers automatically
+
+From the master, run:
 
 ```bash
-# Create worker sessions (each will run Claude Code)
-tmux new-session -d -s worker1
-tmux new-session -d -s worker2
-
-# Start Claude Code in each
-tmux send-keys -t worker1 "cd /path/to/your/project && claude" Enter
-tmux send-keys -t worker2 "cd /path/to/your/project && claude" Enter
+scripts/spawn-workers.sh 3
 ```
 
-### 2. Tell the master
+This creates 3 detached tmux sessions (`worker-1`, `worker-2`, `worker-3`), launches Claude Code in each (in the project dir, so they load `.mcp.json` + `CLAUDE.md`), waits for each to boot, and auto-wakes them to register and read their task. Each worker reports its `tmux-session ↔ worker-N` mapping back to the master, so the master knows which pane is which.
 
-In your main Claude Code instance (the master):
+Useful options:
 
-> "I have 2 tmux worker sessions available: worker1 and worker2"
+| Option | Effect |
+|---|---|
+| `--bypass` | Launch workers in `bypassPermissions` mode (fully hands-off; no approval needed) |
+| `--perm-mode <mode>` | Set `claude --permission-mode` explicitly (default: `acceptEdits`) |
+| `--no-wake` | Create + launch only; master wakes them itself later |
+| `--prefix <name>` | tmux session-name prefix (default: `worker`) |
+| `--project <dir>` | Project dir to launch in (default: current dir) |
+| `--ready-timeout <s>` | Boot wait per worker (default: 30) |
 
-The master will register itself, send tasks to workers via the DB, and wake them via `tmux send-keys`.
+### 3. Approve flagged permission prompts
 
-### 3. Let it run
+In the default `acceptEdits` mode, workers auto-accept file edits but **pause on Bash and other tools**. A blocked worker is frozen and cannot report over InterComm, so the master polls for them:
 
-The master handles everything: task delegation, monitoring progress (via `tmux capture-pane` and `intercomm_read`), answering worker questions, and collecting results.
+```bash
+scripts/scan-workers.sh
+```
+
+For any worker reported as `blocked`, the scan prints the pending command and how to answer it. Approve (or deny) by sending the option number:
+
+```bash
+tmux send-keys -t worker-1 "1" Enter    # 1 = Yes, 3 = No
+```
+
+(Verified: the master can read a worker's permission dialog via `tmux capture-pane` and select an option via `tmux send-keys`.) To skip approvals entirely, spawn with `--bypass`.
+
+### 4. Let it run, then tear down
+
+The master delegates via `intercomm_send(type: "task")`, wakes workers via `tmux send-keys`, monitors with `tmux capture-pane` / `intercomm_read` / `scan-workers.sh`, and collects results. When done:
+
+```bash
+scripts/kill-workers.sh
+```
 
 ### Tips
 
-- **Extra Enter for prompt submission:** When waking workers via `tmux send-keys`, send an extra `Enter` to ensure the prompt is actually submitted in Claude Code: `tmux send-keys -t <pane> "message" Enter Enter`
-- **Permission prompts:** Workers may hit tool permission prompts (e.g., "Do you want to proceed?") that block execution. The master can approve these remotely via `tmux send-keys -t <pane> Enter`, but this requires monitoring. See [Known Limitations](#known-limitations) below.
+- **Extra Enter for prompt submission:** When waking workers manually via `tmux send-keys`, send an extra `Enter` so the prompt actually submits in Claude Code: `tmux send-keys -t <pane> "message" Enter Enter`. (The spawn script already does this.)
+- **Manual alternative:** You can still create sessions by hand (`tmux new-session -d -s worker-1 -c /path/to/project; tmux send-keys -t worker-1 "claude --permission-mode acceptEdits" Enter`) if you prefer.
 
 ## MCP Tools (7 total)
 
@@ -144,12 +169,16 @@ node dist/mcp-entry.js   # prints "InterComm AIMFP MCP server error: ..." on fai
 
 ### Worker Permission Prompts
 
-Claude Code requires user approval for certain tool calls (e.g., running bash commands, writing files). When workers hit these permission prompts, they block until approved. The master can approve remotely via `tmux send-keys`, but this is fragile — the master must monitor worker panes and send the right keystrokes.
+Claude Code requires approval for certain tool calls (e.g., running bash commands). When a worker hits a permission prompt it **blocks** until answered, and while blocked it cannot report over InterComm — so the master must detect blocked workers by polling their panes.
 
-**Potential solutions for future consideration:**
-- Run workers with `claude --dangerously-skip-permissions` to bypass all prompts (use with caution)
-- Configure per-project allowlists in `.claude/settings.json` to pre-approve common operations
-- Add a master-side monitoring loop that detects blocked workers and auto-approves
+This is handled, not eliminated:
+- Workers are spawned in `acceptEdits` mode by default (file edits auto-approved; Bash/other still prompt).
+- `scripts/scan-workers.sh` polls every worker pane and reports which are blocked, with the pending command.
+- The master approves via `tmux send-keys -t <session> "1" Enter` (verified: the dialog is readable via `capture-pane` and selectable via `send-keys`).
+
+**Reduce or remove the prompts further:**
+- Spawn with `--bypass` (`bypassPermissions`) for fully hands-off workers (use with caution — workers run anything unprompted).
+- Pre-approve common operations in `.claude/settings.local.json` (`permissions.allow`), e.g. `Bash(npm run:*)`. The InterComm MCP tools are already allowlisted in this repo.
 
 ### tmux Prompt Submission
 

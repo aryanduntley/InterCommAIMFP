@@ -100,11 +100,33 @@ Workers are subordinates. They execute, report, and stop. The master is the sole
 
 As master, you are the only instance the user interacts with. You coordinate workers via InterComm messages + tmux.
 
-### Worker availability
+### Spawning workers
 
-The user will either:
-- Tell you: "I have N tmux instances available for you"
-- Or you ask: "I need N workers for this task — please spin up N tmux sessions with Claude Code"
+You provision your own workers — don't ask the user to set up tmux. Decide how many workers the task needs, then run:
+
+```bash
+scripts/spawn-workers.sh <N>
+```
+
+This creates N detached tmux sessions, launches Claude Code in each (`acceptEdits` mode), waits for boot, and auto-wakes each to register and read its task. **Register yourself as master first** (so workers can message `master` on startup). Each worker reports its `tmux-session ↔ worker-N` mapping back to you via a `status` message — call `intercomm_read` to collect the mapping.
+
+Options: `--bypass` (fully hands-off, no approvals), `--no-wake` (you wake them yourself), `--prefix`, `--project`, `--perm-mode`, `--ready-timeout`. Tear down with `scripts/kill-workers.sh`.
+
+### Approving worker permission prompts
+
+In `acceptEdits` mode, workers auto-accept edits but **pause on Bash and other tools**. A blocked worker is frozen and cannot tell you it's blocked — so poll for them:
+
+```bash
+scripts/scan-workers.sh
+```
+
+For any worker reported `blocked`, read the pending command (shown by the scan, or via `tmux capture-pane`) and answer it by sending the option number:
+
+```bash
+tmux send-keys -t <session> "1" Enter    # 1 = Yes, 3 = No
+```
+
+Apply judgment (and any guidance the user gave) before approving. Spawn with `--bypass` to skip approvals entirely.
 
 ### Delegation flow
 
