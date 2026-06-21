@@ -10,8 +10,11 @@ import type {
   MessageType,
   Role,
   CursorRow,
+  Worktree,
+  WorktreeRow,
+  WorktreeStatus,
 } from "./types.js";
-import { instanceFromRow, messageFromRow } from "./types.js";
+import { instanceFromRow, messageFromRow, worktreeFromRow } from "./types.js";
 import { STALE_THRESHOLD_MS } from "./config.js";
 import { execute, queryOne, queryAll } from "./db.js";
 
@@ -167,6 +170,88 @@ export const readNewMessages = (
 
   touchInstance(instanceId);
   return rows.map(messageFromRow);
+};
+
+// --- Pure helpers: worktrees ---
+
+export const formatWorktreeForDisplay = (wt: Worktree): string => {
+  const seen = new Date(wt.updatedAt).toLocaleTimeString();
+  const branch = wt.branch || "(detached — no branch yet)";
+  return `  ${wt.workerId} [${wt.status}] — ${branch} @ ${wt.path} (base: ${wt.base}, updated: ${seen})`;
+};
+
+// --- IO: Worktree operations ---
+
+// Record an isolated worktree for a worker. Idempotent on worker_id (re-spawn
+// replaces the row). branch starts empty — the worker reports it back later
+// (Phase 2), at which point the master fills it via setWorktreeStatus.
+export const upsertWorktree = (
+  workerId: string,
+  path: string,
+  base: string,
+): Worktree => {
+  const now = nowMs();
+  execute(
+    `INSERT INTO worktrees (worker_id, branch, path, base, status, created_at, updated_at)
+     VALUES (?, '', ?, ?, 'active', ?, ?)
+     ON CONFLICT(worker_id) DO UPDATE SET
+       path = excluded.path,
+       base = excluded.base,
+       status = 'active',
+       updated_at = excluded.updated_at`,
+    workerId,
+    path,
+    base,
+    now,
+    now,
+  );
+  return {
+    workerId,
+    branch: "",
+    path,
+    base,
+    status: "active",
+    createdAt: now,
+    updatedAt: now,
+  };
+};
+
+export const getWorktree = (workerId: string): Worktree | undefined => {
+  const row = queryOne<WorktreeRow>(
+    `SELECT * FROM worktrees WHERE worker_id = ?`,
+    workerId,
+  );
+  return row ? worktreeFromRow(row) : undefined;
+};
+
+export const getAllWorktrees = (): readonly Worktree[] =>
+  queryAll<WorktreeRow>(`SELECT * FROM worktrees ORDER BY created_at`)
+    .map(worktreeFromRow);
+
+// Update lifecycle status, optionally also recording the branch the worker
+// reported (its AIMFP aimfp-worker-N-NNN branch). branch is only overwritten
+// when a non-empty value is supplied, so status-only updates preserve it.
+export const setWorktreeStatus = (
+  workerId: string,
+  status: WorktreeStatus,
+  branch?: string,
+): void => {
+  execute(
+    `UPDATE worktrees
+       SET status = ?,
+           branch = CASE WHEN ? <> '' THEN ? ELSE branch END,
+           updated_at = ?
+     WHERE worker_id = ?`,
+    status,
+    branch ?? "",
+    branch ?? "",
+    nowMs(),
+    workerId,
+  );
+};
+
+export const markWorktreeRemoved = (workerId: string): void => {
+  setWorktreeStatus(workerId, "removed");
 };
 
 export const clearOldMessages = (keep: number): number => {

@@ -2,11 +2,16 @@
 
 import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
-import { dbFile } from "./config.js";
+import { basePath, dbFile, resolveDbRoot, ENV_DB_ROOT } from "./config.js";
 import { ensureDir } from "./fs-wrapper.js";
-import { basePath } from "./config.js";
+import { gitCommonDir } from "./git-wrapper.js";
+import { WORKTREE_STATUSES } from "./types.js";
 
 let db: DatabaseType | null = null;
+
+// Build the CHECK clause from the single source of truth in types.ts so the
+// schema can never drift from the WorktreeStatus union.
+const WORKTREE_STATUS_CHECK = WORKTREE_STATUSES.map((s) => `'${s}'`).join(", ");
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS instances (
@@ -33,6 +38,17 @@ CREATE TABLE IF NOT EXISTS read_cursors (
   instance_id TEXT NOT NULL,
   last_read_ts INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (instance_id)
+);
+
+CREATE TABLE IF NOT EXISTS worktrees (
+  worker_id   TEXT PRIMARY KEY,
+  branch      TEXT NOT NULL DEFAULT '',
+  path        TEXT NOT NULL,
+  base        TEXT NOT NULL DEFAULT 'main',
+  status      TEXT NOT NULL DEFAULT 'active'
+              CHECK(status IN (${WORKTREE_STATUS_CHECK})),
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
 );
 `;
 
@@ -79,3 +95,14 @@ export const queryOne = <T>(sql: string, ...params: unknown[]): T | undefined =>
 
 export const queryAll = <T>(sql: string, ...params: unknown[]): T[] =>
   getDb().prepare(sql).all(...params) as T[];
+
+// IO composition: gather the env override + git common dir, then defer to the
+// pure resolveDbRoot. Both entry points (mcp-entry, cli) call this so every
+// instance — including workers launched inside isolated worktrees — attaches to
+// the one shared intercomm.db at the repo root.
+export const resolveRoot = (cwd: string): string =>
+  resolveDbRoot({
+    cwd,
+    envRoot: process.env[ENV_DB_ROOT],
+    gitCommonDir: gitCommonDir(cwd),
+  });

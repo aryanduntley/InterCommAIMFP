@@ -1,6 +1,15 @@
 {
   "mcpServers": {
-    "intercomm": {
+    "aimfp": {
+      "type": "stdio",
+      "command": "python3",
+      "args": [
+        "-m",
+        "aimfp"
+      ],
+      "env": {}
+    },
+   "intercomm": {
       "command": "node",
       "args": ["dist/mcp-entry.js"]
     }

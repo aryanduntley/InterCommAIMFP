@@ -1,13 +1,18 @@
-// MCP server — 6 tool handlers (register + communication + management)
+// MCP server — 11 tool handlers (register + communication + management + worktrees)
 // Auto-init DB at server startup
 
 import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { dirname } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { MessageType, Role } from "./types.js";
+import type { MessageType, Role, WorktreeStatus } from "./types.js";
+import { WORKTREE_STATUSES } from "./types.js";
+import { worktreePath } from "./config.js";
 import { initDb, closeDb } from "./db.js";
+import { ensureDir } from "./fs-wrapper.js";
+import { addWorktree, removeWorktree } from "./git-wrapper.js";
 import * as store from "./store.js";
 
 // --- Server state (mutable ref, set during bootstrap) ---
@@ -38,6 +43,13 @@ const errorResult = (text: string): CallToolResult => ({
 const requireIdentity = (state: ServerState): CallToolResult | null => {
   if (!state.identity) return errorResult("Not registered. Call intercomm_register first.");
   store.touchInstance(state.identity.id);
+  return null;
+};
+
+const requireMaster = (state: ServerState): CallToolResult | null => {
+  const err = requireIdentity(state);
+  if (err) return err;
+  if (state.identity!.role !== "master") return errorResult("Master-only action.");
   return null;
 };
 
@@ -143,12 +155,88 @@ const handleClear = (
   state: ServerState,
   args: { keep: number },
 ): CallToolResult => {
-  const err = requireIdentity(state);
+  const err = requireMaster(state);
   if (err) return err;
-  if (state.identity!.role !== "master") return errorResult("Only master can clear messages.");
 
   const deleted = store.clearOldMessages(args.keep);
   return textResult(`Cleared ${deleted} old messages (kept last ${args.keep}).`);
+};
+
+// --- Worktree handlers (multi-agent parallelization addon) ---
+//
+// InterComm's git footprint is ONLY worktree add/remove (filesystem isolation).
+// Branch creation + merges are AIMFP directives run by the agents — never here.
+
+const handleWorktreeAdd = (
+  state: ServerState,
+  args: { worker_id: string; base: string; path?: string },
+): CallToolResult => {
+  const err = requireMaster(state);
+  if (err) return err;
+
+  const base = args.base?.trim() || "main";
+  const path = args.path?.trim() || worktreePath(state.root, args.worker_id);
+
+  ensureDir(dirname(path));
+  const res = addWorktree(state.root, path, base);
+  if (!res.ok) return errorResult(`git worktree add failed: ${res.error}`);
+
+  store.upsertWorktree(args.worker_id, path, base);
+  return textResult(
+    `Worktree for ${args.worker_id} created at ${path} (detached from ${base}). ` +
+      `The worker should run AIMFP git_create_branch inside it to make its branch.`,
+  );
+};
+
+const handleWorktreeList = (state: ServerState): CallToolResult => {
+  const err = requireIdentity(state);
+  if (err) return err;
+
+  const worktrees = store.getAllWorktrees();
+  if (worktrees.length === 0) return textResult("No worktrees registered.");
+
+  const lines = [
+    `--- ${worktrees.length} worktree(s) ---`,
+    ...worktrees.map(store.formatWorktreeForDisplay),
+  ];
+  return textResult(lines.join("\n"));
+};
+
+const handleWorktreeSetStatus = (
+  state: ServerState,
+  args: { worker_id: string; status: WorktreeStatus; branch?: string },
+): CallToolResult => {
+  const err = requireMaster(state);
+  if (err) return err;
+
+  if (!store.getWorktree(args.worker_id)) {
+    return errorResult(`No worktree registered for "${args.worker_id}"`);
+  }
+
+  store.setWorktreeStatus(args.worker_id, args.status, args.branch?.trim());
+  const branchNote = args.branch?.trim() ? `, branch=${args.branch.trim()}` : "";
+  return textResult(`Worktree ${args.worker_id} → ${args.status}${branchNote}`);
+};
+
+const handleWorktreeRemove = (
+  state: ServerState,
+  args: { worker_id: string; force: boolean },
+): CallToolResult => {
+  const err = requireMaster(state);
+  if (err) return err;
+
+  const wt = store.getWorktree(args.worker_id);
+  if (!wt) return errorResult(`No worktree registered for "${args.worker_id}"`);
+
+  const res = removeWorktree(state.root, wt.path, args.force);
+  if (!res.ok) {
+    return errorResult(
+      `git worktree remove failed: ${res.error} (retry with force=true if it has changes)`,
+    );
+  }
+
+  store.markWorktreeRemoved(args.worker_id);
+  return textResult(`Worktree ${args.worker_id} removed (${wt.path}).`);
 };
 
 // --- Tool registration ---
@@ -199,6 +287,38 @@ const registerTools = (server: McpServer, state: ServerState): void => {
       keep: z.number().int().min(0).default(100).describe("Number of recent messages to retain (default: 100)"),
     },
   }, (args) => handleClear(state, args as { keep: number }));
+
+  // --- Worktree / orchestration tools (multi-agent addon) ---
+
+  server.registerTool("intercomm_worktree_add", {
+    description: "Master-only. Create an isolated git worktree (detached HEAD) for a worker and register it. InterComm only isolates files — the worker runs AIMFP git_create_branch inside the worktree to make its branch.",
+    inputSchema: {
+      worker_id: z.string().describe("Worker id this worktree belongs to (e.g. worker-1)"),
+      base: z.string().default("main").describe("Git ref to check out detached (default: main)"),
+      path: z.string().optional().describe("Worktree path (default: sibling .intercomm-worktrees/<worker_id>)"),
+    },
+  }, (args) => handleWorktreeAdd(state, args as { worker_id: string; base: string; path?: string }));
+
+  server.registerTool("intercomm_worktree_list", {
+    description: "List all registered worktrees and their lifecycle status (the master's merge-queue view).",
+  }, () => handleWorktreeList(state));
+
+  server.registerTool("intercomm_worktree_set_status", {
+    description: "Master-only. Update a worktree's lifecycle status, optionally recording the branch the worker reported back.",
+    inputSchema: {
+      worker_id: z.string().describe("Worker id whose worktree to update"),
+      status: z.enum(WORKTREE_STATUSES).describe("New lifecycle status"),
+      branch: z.string().optional().describe("Branch the worker reported (e.g. aimfp-worker-1-001); leave empty to keep current"),
+    },
+  }, (args) => handleWorktreeSetStatus(state, args as { worker_id: string; status: WorktreeStatus; branch?: string }));
+
+  server.registerTool("intercomm_worktree_remove", {
+    description: "Master-only. Remove a worker's git worktree and mark it removed in the registry.",
+    inputSchema: {
+      worker_id: z.string().describe("Worker id whose worktree to remove"),
+      force: z.boolean().default(false).describe("Pass --force to git worktree remove (drops uncommitted changes)"),
+    },
+  }, (args) => handleWorktreeRemove(state, args as { worker_id: string; force: boolean }));
 };
 
 // --- Factory (the only place with `new`) ---
@@ -211,7 +331,7 @@ export const createAndRunServer = async (root: string): Promise<void> => {
 
   const server = new McpServer({
     name: "intercomm-aimfp",
-    version: "0.3.0",
+    version: "0.4.0",
   });
 
   registerTools(server, state);

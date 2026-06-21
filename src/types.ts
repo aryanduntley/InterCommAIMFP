@@ -81,3 +81,63 @@ export type ParsedArgs = {
   readonly positional: readonly string[];
   readonly flags: Readonly<Record<string, string | boolean>>;
 };
+
+// --- Worktree registry (multi-agent parallelization addon) ---
+//
+// Single source of truth for the worktree lifecycle. The status set is a
+// superset informed by ctx's agent merge queue (queued / verifying / conflict)
+// layered onto the original design states. InterComm only TRACKS these — it
+// never merges; AIMFP git directives own the actual branch/merge semantics.
+//
+//   active    — worker is editing inside its worktree
+//   done      — worker reported its task complete (ready to submit)
+//   queued    — submitted to the master's merge queue, awaiting its turn
+//   merging   — master is merging the branch (AIMFP git_merge_branch)
+//   verifying — verification command running on the merged result (ctx gate)
+//   merged    — applied + verified; target branch advanced
+//   conflict  — could not apply cleanly on the latest target; back for revision
+//   failed    — applied but verification failed (or an execution error)
+//   removed   — worktree torn down
+export const WORKTREE_STATUSES = [
+  "active",
+  "done",
+  "queued",
+  "merging",
+  "verifying",
+  "merged",
+  "conflict",
+  "failed",
+  "removed",
+] as const;
+
+export type WorktreeStatus = (typeof WORKTREE_STATUSES)[number];
+
+export type Worktree = {
+  readonly workerId: string;
+  readonly branch: string;
+  readonly path: string;
+  readonly base: string;
+  readonly status: WorktreeStatus;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+};
+
+export type WorktreeRow = {
+  worker_id: string;
+  branch: string;
+  path: string;
+  base: string;
+  status: string;
+  created_at: number;
+  updated_at: number;
+};
+
+export const worktreeFromRow = (row: WorktreeRow): Worktree => ({
+  workerId: row.worker_id,
+  branch: row.branch,
+  path: row.path,
+  base: row.base,
+  status: row.status as WorktreeStatus,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});

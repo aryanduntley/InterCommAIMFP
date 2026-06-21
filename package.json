@@ -1,6 +1,6 @@
 {
   "name": "intercomm-aimfp",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "Local intercommunication system for coordinating multiple Claude Code instances via SQLite",
   "type": "module",
   "main": "dist/cli.js",

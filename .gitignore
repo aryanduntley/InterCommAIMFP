@@ -1,4 +1,49 @@
+# --- Build output & dependencies ---
 node_modules/
 dist/
+*.tsbuildinfo
+
+# --- InterComm runtime data (created by master in project dir) ---
 .intercomm/
 .intercomm-aimfp/
+
+# Per-worker git worktrees (created by scripts/spawn-workers.sh --worktrees)
+.intercomm-worktrees/
+
+# SQLite databases + WAL/SHM sidecars (intercomm.db lives under runtime dirs,
+# but guard against stray copies anywhere in the tree)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# --- Local-only reference material (not tracked, not part of the build) ---
+# Planning/handoff docs and the ctx reference repo are kept locally only.
+docs/
+ctx/
+
+# --- Logs ---
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Environment / secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Editor / IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS cruft ---
+.DS_Store
+.DS_Store?
+Thumbs.db
+desktop.ini

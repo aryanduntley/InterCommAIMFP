@@ -3,7 +3,7 @@
 // CLI entry point — debug-only interface for InterComm AIMFP
 
 import type { ParsedArgs, MessageType } from "./types.js";
-import { initDb, closeDb } from "./db.js";
+import { initDb, closeDb, resolveRoot } from "./db.js";
 import * as store from "./store.js";
 
 // --- Pure argument parsing ---
@@ -33,7 +33,7 @@ const parseArgs = (argv: readonly string[]): ParsedArgs => {
   return { command, positional, flags };
 };
 
-const getRoot = (): string => process.cwd();
+const getRoot = (): string => resolveRoot(process.cwd());
 
 // --- Command handlers ---
 
