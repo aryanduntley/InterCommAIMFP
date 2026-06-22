@@ -136,6 +136,23 @@ wait_ready() {
       sleep 1
       continue
     fi
+    # First-run "new MCP servers found" approval (each fresh checkout/worktree is new
+    # to Claude) — the servers are pre-checked, so Enter confirms them.
+    if printf '%s' "$cap" | grep -qiE "new MCP servers found|Select any you wish to enable"; then
+      tmux send-keys -t "$s" Enter
+      sleep 1
+      continue
+    fi
+    # Bypass-permissions warning (only with --bypass / bypassPermissions). The DEFAULT
+    # selection is "1. No, exit", so a bare Enter would KILL the worker — select option
+    # 2 ("Yes, I accept") explicitly, then confirm.
+    if printf '%s' "$cap" | grep -qiE "Yes, I accept"; then
+      tmux send-keys -t "$s" "2"
+      sleep 1
+      tmux send-keys -t "$s" Enter
+      sleep 1
+      continue
+    fi
     # Ready markers across permission modes.
     if printf '%s' "$cap" | grep -qiE "for shortcuts|shift\+tab to cycle|accept edits on|bypass permissions on|plan mode on|auto mode on"; then
       return 0

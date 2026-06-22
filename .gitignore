@@ -10,13 +10,11 @@ dist/
 # Per-worker git worktrees (created by scripts/spawn-workers.sh --worktrees)
 .intercomm-worktrees/
 
-# SQLite databases + WAL/SHM sidecars (intercomm.db lives under runtime dirs,
-# but guard against stray copies anywhere in the tree)
-*.db
-*.db-wal
-*.db-shm
-*.sqlite
-*.sqlite3
+# AIMFP project state (.aimfp-project/) is intentionally TRACKED — AIMFP's git
+# model commits project.db / user_preferences.db so clones and per-worker worktrees
+# carry the project state. InterComm's own runtime DBs are already excluded by the
+# .intercomm-aimfp/ and .intercomm-worktrees/ directory ignores above, so NO blanket
+# *.db rule is used here (it would swallow the AIMFP DBs).
 
 # --- Local-only reference material (not tracked, not part of the build) ---
 # Planning/handoff docs and the ctx reference repo are kept locally only.

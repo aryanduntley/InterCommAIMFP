@@ -9,9 +9,8 @@
       ],
       "env": {}
     },
-   "intercomm": {
-      "command": "node",
-      "args": ["dist/mcp-entry.js"]
+    "intercomm": {
+      "command": "intercomm-mcp"
     }
   }
 }
