@@ -87,12 +87,44 @@ Workers are subordinates. They execute, report, and stop. The master is the sole
 
 | Type | When to Use |
 |---|---|
-| `task` | Master sends to assign work. Include clear scope and acceptance criteria. |
+| `task` | Master sends to assign work. The content is a structured **task contract** (see below) — goal, constraints, validation, and report-back fields. |
 | `status` | Report progress at meaningful milestones. Keep it concise: what you did, what's next. |
 | `question` | When you're blocked and need input. State what you need and from whom. |
 | `answer` | Reply to a `question`. Reference what you're answering. |
 | `announce` | Broadcast information everyone should know (e.g., "I refactored module X, imports changed"). |
 | `done` | Signal task completion. Include a brief summary of what was done and any follow-up needed. |
+
+---
+
+## Task Contract
+
+When the master assigns work, the `task` message's content is a structured **task contract** — a JSON object the worker parses before acting. InterComm carries it as opaque content; it never reads or runs any of these fields. The worker (which has the AIMFP tools) is what interprets and honors them.
+
+```json
+{
+  "kind": "task_contract",
+  "v": 1,
+  "goal": "What to achieve — the single instruction.",
+  "constraints": ["Hard boundaries the worker must NOT cross."],
+  "validation": ["Checks/commands to run before reporting done, e.g. 'npm run build'."],
+  "output": "The one reviewable outcome this task produces.",
+  "branchConvention": "aimfp-worker-{n}-{seq}",
+  "requiredDirectives": ["git_create_branch"],
+  "reportBack": ["branch_name", "commit_hash", "done"]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `goal` | The instruction / outcome to achieve. |
+| `constraints` | Hard boundaries — the worker must not cross these (e.g. "do not touch src/store.ts"). |
+| `validation` | Checks the worker runs and must pass **before** reporting `done` (e.g. build/tests). |
+| `output` | The single reviewable outcome (one outcome per task — keep tasks atomic). |
+| `branchConvention` | Branch-name template the worker's branch must follow. |
+| `requiredDirectives` | AIMFP directive **names** the worker must run (e.g. `git_create_branch`). InterComm never runs them — the worker does. |
+| `reportBack` | The fields the worker must include when it reports completion. |
+
+A worker that cannot parse the contract (not JSON, wrong `kind`/`v`, or missing/malformed fields) must **not** act on it — send a `question` to the master describing the problem and wait.
 
 ---
 
@@ -157,14 +189,16 @@ intercomm_send(to: "worker-1", message: "task details...", type: "task")
 As a worker, you execute tasks and report back. **You operate autonomously — do NOT ask the user for input or confirmation. All communication goes through InterComm to the master. The user interacts only with the master instance.**
 
 1. **Register.** Call `intercomm_register()` when prompted by the master via tmux.
-2. **Read your task.** Call `intercomm_read` to get your assignment.
+2. **Read your task.** Call `intercomm_read` to get your assignment, then parse the **task contract** (see above) from the `task` message content. If it does not parse — not JSON, wrong `kind`/`v`, or a missing/malformed field — do NOT act: send a `question` to the master describing the problem and wait.
 3. **Acknowledge.** Send a `status` message confirming you've started: `intercomm_send(to: "master", message: "Starting on X", type: "status")`.
-4. **Do the work.** Execute the task autonomously. No need to poll — just work.
-5. **Ask when blocked.** Send a `question` to the master via InterComm: `intercomm_send(to: "master", message: "question", type: "question")`. Then wait — the master will wake you via tmux when the answer is ready.
-6. **Signal completion.** Send `intercomm_send(to: "master", message: "summary of work done", type: "done")`.
-7. **Stop.** After sending `done`, do nothing. The master will wake you via tmux if there's more work.
+4. **Run required directives first.** Run every directive named in `requiredDirectives` before editing — in particular run AIMFP `git_create_branch` **inside your own worktree** so your work lands on a branch matching `branchConvention` (e.g. `aimfp-worker-1-001`). Capture the resulting branch name and commit hash for your report.
+5. **Do the work — within the contract.** Execute `goal` autonomously to produce the single `output`. Treat every entry in `constraints` as a hard boundary you must not cross. No need to poll — just work.
+6. **Validate before done.** Run every check in `validation` (e.g. `npm run build`, tests). Only proceed to report `done` if they all pass. If validation fails and you cannot fix it within the contract, send a `question` to the master instead.
+7. **Ask when blocked.** Send a `question` to the master via InterComm: `intercomm_send(to: "master", message: "question", type: "question")`. Then wait — the master will wake you via tmux when the answer is ready.
+8. **Signal completion.** Send `intercomm_send(to: "master", message: ..., type: "done")` including every field named in `reportBack` — at minimum `branch_name` and `commit_hash` so the master can record your branch and queue it for merge.
+9. **Stop.** After sending `done`, do nothing. The master will wake you via tmux if there's more work.
 
-**Do NOT poll `intercomm_read` in a loop. Do NOT ask the user anything. Just work, report, and stop.**
+**Do NOT poll `intercomm_read` in a loop. Do NOT ask the user anything. Do NOT cross a `constraint` or report `done` before `validation` passes. Just work, validate, report, and stop.**
 
 ---
 

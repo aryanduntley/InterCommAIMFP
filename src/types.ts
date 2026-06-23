@@ -85,6 +85,37 @@ export type ParsedArgs = {
   readonly flags: Readonly<Record<string, string | boolean>>;
 };
 
+// --- Task contract (Phase 2: directive-driven tasking) ---
+//
+// The JSON payload a master sends a worker inside messages.content (type
+// "task"). InterComm stays AIMFP-agnostic: it only carries this contract as
+// opaque message content — the worker is what honors requiredDirectives and
+// runs validation. Fields mirror the ctx task-contract discipline:
+//
+//   goal               — the instruction / outcome to achieve
+//   constraints        — hard boundaries the worker must not cross
+//   validation         — checks/commands the worker runs before reporting done
+//   output             — the single reviewable outcome (one outcome per task)
+//   branchConvention   — branch-name template (e.g. aimfp-worker-{n}-{seq})
+//   requiredDirectives — AIMFP directive names the worker must run (e.g.
+//                        git_create_branch) — names only; InterComm never runs them
+//   reportBack         — field names the worker must send back on completion
+export type TaskContract = {
+  readonly goal: string;
+  readonly constraints: readonly string[];
+  readonly validation: readonly string[];
+  readonly output: string;
+  readonly branchConvention: string;
+  readonly requiredDirectives: readonly string[];
+  readonly reportBack: readonly string[];
+};
+
+// Result of parseTaskContract — a never-throws discriminated union so a worker
+// can reject a malformed task instead of acting on garbage.
+export type ParsedTaskContract =
+  | { readonly ok: true; readonly contract: TaskContract }
+  | { readonly ok: false; readonly error: string };
+
 // --- Worktree registry (multi-agent parallelization addon) ---
 //
 // Single source of truth for the worktree lifecycle. The status set is a
