@@ -1,4 +1,5 @@
-// MCP server — 11 tool handlers (register + communication + management + worktrees)
+// MCP server — 16 tool handlers (register + communication + management +
+// worktrees + orchestration: spawn/wake/scan/approve/teardown).
 // Auto-init DB at server startup
 
 import { randomUUID } from "node:crypto";
@@ -13,6 +14,8 @@ import { worktreePath } from "./config.js";
 import { initDb, closeDb } from "./db.js";
 import { ensureDir } from "./fs-wrapper.js";
 import { addWorktree, removeWorktree } from "./git-wrapper.js";
+import * as tmux from "./tmux-wrapper.js";
+import * as orchestrate from "./orchestrate.js";
 import * as store from "./store.js";
 
 // --- Server state (mutable ref, set during bootstrap) ---
@@ -64,6 +67,16 @@ const SEND_TYPES = [
   "done",
 ] as const;
 
+// claude --permission-mode values (the orchestration tools launch workers with one).
+const PERM_MODES = [
+  "acceptEdits",
+  "auto",
+  "bypassPermissions",
+  "default",
+  "dontAsk",
+  "plan",
+] as const;
+
 // --- Handlers ---
 
 const handleRegister = (
@@ -76,7 +89,7 @@ const handleRegister = (
     return errorResult(`Already registered as "${state.identity.id}" (${state.identity.role}). Restart to re-register.`);
   }
 
-  const instance = store.registerAs(args.role, state.sessionId);
+  const instance = store.registerAs(args.role, state.sessionId, tmux.currentPaneTarget());
   state.identity = { id: instance.id, role: instance.role };
 
   return textResult(
@@ -239,6 +252,115 @@ const handleWorktreeRemove = (
   return textResult(`Worktree ${args.worker_id} removed (${wt.path}).`);
 };
 
+// --- Orchestration handlers (the tool-driven multi-agent lifecycle) ---
+//
+// Thin: each parses args, calls an orchestrate sequence, and formats the report.
+// All master-only. They retire spawn/scan/kill-workers.sh as runtime dependencies.
+
+const handleSpawn = async (
+  state: ServerState,
+  args: {
+    count: number; prefix: string; perm_mode: string; claude_cmd: string;
+    worktrees: boolean; worktree_base: string; bootstrap?: string;
+    ready_timeout: number; wake: boolean;
+  },
+): Promise<CallToolResult> => {
+  const err = requireMaster(state);
+  if (err) return err;
+  if (args.count < 1) return errorResult("count must be >= 1");
+
+  const reports = await orchestrate.spawnWorkers({
+    root: state.root,
+    count: args.count,
+    prefix: args.prefix,
+    permMode: args.perm_mode,
+    claudeCmd: args.claude_cmd,
+    worktrees: args.worktrees,
+    worktreeBase: args.worktree_base,
+    bootstrap: args.bootstrap?.trim() ?? "",
+    readyTimeoutMs: args.ready_timeout * 1000,
+    wake: args.wake,
+  });
+
+  const lines = reports.map((r) =>
+    `session=${r.session} state=${r.state} ready=${r.ready ? "yes" : "no"} woken=${r.woken ? "yes" : "no"} worktree=${r.worktree || "-"}`,
+  );
+  return textResult([
+    `Spawned ${reports.length} worker(s):`,
+    ...lines,
+    "Workers self-register asynchronously — call intercomm_status to confirm the session<->id mapping. Use intercomm_scan/intercomm_approve for any pane left on a dialog.",
+  ].join("\n"));
+};
+
+const handleWake = async (
+  state: ServerState,
+  args: { worker: string; message: string },
+): Promise<CallToolResult> => {
+  const err = requireMaster(state);
+  if (err) return err;
+
+  const res = await orchestrate.wakeWorker(args.worker, args.message);
+  if (!res.resolved) {
+    return errorResult(`No live tmux pane for "${args.worker}" (resolved target: ${res.target || "—"}).`);
+  }
+  return textResult(`Woke ${args.worker} (${res.target}).`);
+};
+
+const handleScan = (
+  state: ServerState,
+  args: { prefix: string },
+): CallToolResult => {
+  const err = requireMaster(state);
+  if (err) return err;
+
+  const reports = orchestrate.scanWorkers(args.prefix);
+  if (reports.length === 0) return textResult(`No worker sessions found (prefix: ${args.prefix}-).`);
+
+  const lines = reports.map((r) =>
+    `session=${r.session} state=${r.state}${r.needsAttention ? "  <- needs intercomm_approve" : ""}`,
+  );
+  const blocked = reports.filter((r) => r.needsAttention).length;
+  return textResult([
+    `--- ${reports.length} worker pane(s) ---`,
+    ...lines,
+    `${blocked} of ${reports.length} need attention.`,
+  ].join("\n"));
+};
+
+const handleApprove = async (
+  state: ServerState,
+  args: { worker: string; timeout: number },
+): Promise<CallToolResult> => {
+  const err = requireMaster(state);
+  if (err) return err;
+
+  const r = await orchestrate.approveWorker(args.worker, args.timeout * 1000);
+  if (!r.resolved) {
+    return errorResult(`No live tmux pane for "${args.worker}" (target: ${r.target || "—"}).`);
+  }
+  const note = r.cleared
+    ? " (cleared)"
+    : r.before === "ready" || r.before === "running" || r.before === "idle"
+      ? " (nothing to clear)"
+      : " (still blocked — retry, or inspect the pane)";
+  return textResult(`Approve ${args.worker}: ${r.before} -> ${r.after}${note}`);
+};
+
+const handleTeardown = (
+  state: ServerState,
+  args: { prefix: string; worktrees: boolean },
+): CallToolResult => {
+  const err = requireMaster(state);
+  if (err) return err;
+
+  const r = orchestrate.teardownWorkers(state.root, args.prefix, args.worktrees);
+  return textResult([
+    `Torn down ${r.killed.length} session(s): ${r.killed.join(", ") || "(none)"}`,
+    `Worktrees removed: ${r.worktreesRemoved.join(", ") || "(none)"}`,
+    `Instance rows reaped: ${r.reaped.join(", ") || "(none)"}`,
+  ].join("\n"));
+};
+
 // --- Tool registration ---
 
 const registerTools = (server: McpServer, state: ServerState): void => {
@@ -319,6 +441,54 @@ const registerTools = (server: McpServer, state: ServerState): void => {
       force: z.boolean().default(false).describe("Pass --force to git worktree remove (drops uncommitted changes)"),
     },
   }, (args) => handleWorktreeRemove(state, args as { worker_id: string; force: boolean }));
+
+  // --- Orchestration tools (tool-driven lifecycle; retire the shell scripts) ---
+
+  server.registerTool("intercomm_spawn", {
+    description: "Master-only. Spawn N Claude Code workers in detached tmux sessions (retires spawn-workers.sh). Non-blocking: creates sessions, launches claude with INTERCOMM_DB_ROOT pinned to the shared DB, optionally one git worktree per worker, auto-clears first-run dialogs, and wakes each to self-register. Returns session ids; workers register asynchronously (does NOT wait on registration).",
+    inputSchema: {
+      count: z.number().int().min(1).describe("Number of workers to spawn"),
+      prefix: z.string().default("worker").describe("tmux session-name prefix (default: worker)"),
+      perm_mode: z.enum(PERM_MODES).default("acceptEdits").describe("claude --permission-mode (default: acceptEdits)"),
+      claude_cmd: z.string().default("claude").describe("Claude binary to launch (default: claude)"),
+      worktrees: z.boolean().default(false).describe("Launch each worker in its own isolated git worktree (branch-per-agent)"),
+      worktree_base: z.string().default("main").describe("Git ref each worktree checks out detached (default: main)"),
+      bootstrap: z.string().optional().describe("Setup command run inside each new worktree (e.g. 'npm install')"),
+      ready_timeout: z.number().int().min(1).default(20).describe("Per-session seconds to clear boot dialogs before giving up (default: 20)"),
+      wake: z.boolean().default(true).describe("Push the register prompt after each worker boots (default: true)"),
+    },
+  }, (args) => handleSpawn(state, args as Parameters<typeof handleSpawn>[1]));
+
+  server.registerTool("intercomm_wake", {
+    description: "Master-only. Push a prompt into a worker's tmux pane (retires manual `tmux send-keys`). Accepts a worker id (resolved via its stored tmux_target) or a raw tmux target. The no-poll way to hand a worker its next task.",
+    inputSchema: {
+      worker: z.string().describe("Worker id (e.g. worker-1) or raw tmux target (session:window.pane)"),
+      message: z.string().describe("Prompt text to type and submit in the worker's Claude TUI"),
+    },
+  }, (args) => handleWake(state, args as { worker: string; message: string }));
+
+  server.registerTool("intercomm_scan", {
+    description: "Master-only. Report each worker pane's state (retires scan-workers.sh): trust/mcp_approval/bypass/blocked/ready/running/idle. Surfaces workers frozen on a permission dialog (which cannot report over the bus).",
+    inputSchema: {
+      prefix: z.string().default("worker").describe("tmux session-name prefix to scan (default: worker)"),
+    },
+  }, (args) => handleScan(state, args as { prefix: string }));
+
+  server.registerTool("intercomm_approve", {
+    description: "Master-only. Clear a worker's blocking dialog (retires manual `tmux send-keys '1' Enter`): trust, MCP-approval, bypass warning, or a tool permission prompt. Reports the before/after pane state.",
+    inputSchema: {
+      worker: z.string().describe("Worker id or raw tmux target to approve"),
+      timeout: z.number().int().min(1).default(5).describe("Seconds to keep clearing dialogs (default: 5)"),
+    },
+  }, (args) => handleApprove(state, args as { worker: string; timeout: number }));
+
+  server.registerTool("intercomm_teardown", {
+    description: "Master-only. Tear down all workers in one shot (retires kill-workers.sh + the raw SQL reap): kill the tmux sessions, remove their git worktrees (worktree mode), and REAP the instance rows so a stale active=1 cannot drift the next worker's number.",
+    inputSchema: {
+      prefix: z.string().default("worker").describe("tmux session-name prefix to tear down (default: worker)"),
+      worktrees: z.boolean().default(false).describe("Also git worktree remove --force each worker's worktree"),
+    },
+  }, (args) => handleTeardown(state, args as { prefix: string; worktrees: boolean }));
 };
 
 // --- Factory (the only place with `new`) ---

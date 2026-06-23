@@ -102,50 +102,50 @@ As master, you are the only instance the user interacts with. You coordinate wor
 
 ### Spawning workers
 
-You provision your own workers — don't ask the user to set up tmux. Decide how many workers the task needs, then run:
+You provision your own workers — don't ask the user to set up tmux. **Register yourself as master first** (so workers can message `master` on startup), decide how many workers the task needs, then call the `intercomm_spawn` tool:
 
-```bash
-scripts/spawn-workers.sh <N>
+```
+intercomm_spawn(count: <N>)
 ```
 
-This creates N detached tmux sessions, launches Claude Code in each (`acceptEdits` mode), waits for boot, and auto-wakes each to register and read its task. **Register yourself as master first** (so workers can message `master` on startup). Each worker reports its `tmux-session ↔ worker-N` mapping back to you via a `status` message — call `intercomm_read` to collect the mapping.
+This creates N detached tmux sessions, launches Claude Code in each (`acceptEdits` mode, with the shared bus pinned), auto-clears the first-run trust / MCP dialogs, and wakes each to register and read its task. It returns immediately — workers self-register asynchronously, so call `intercomm_status` (or `intercomm_read`) to collect the `session ↔ worker-N` mapping.
 
-Options: `--bypass` (fully hands-off, no approvals), `--no-wake` (you wake them yourself), `--prefix`, `--project`, `--perm-mode`, `--ready-timeout`. Tear down with `scripts/kill-workers.sh`.
+Params: `perm_mode: "bypassPermissions"` (fully hands-off, no approvals), `wake: false` (you wake them yourself via `intercomm_wake`), `prefix`, `worktrees: true` + `worktree_base` + `bootstrap` (branch-per-agent isolation), `ready_timeout`. Tear down with `intercomm_teardown` (add `worktrees: true` if you spawned with worktrees). The `scripts/*.sh` helpers still exist but are a dev-only fallback — prefer the tools.
 
 ### Approving worker permission prompts
 
-In `acceptEdits` mode, workers auto-accept edits but **pause on Bash and other tools**. A blocked worker is frozen and cannot tell you it's blocked — so poll for them:
+In `acceptEdits` mode, workers auto-accept edits but **pause on Bash and other tools**. A blocked worker is frozen and cannot tell you it's blocked — so poll for them with `intercomm_scan`:
 
-```bash
-scripts/scan-workers.sh
+```
+intercomm_scan()
 ```
 
-For any worker reported `blocked`, read the pending command (shown by the scan, or via `tmux capture-pane`) and answer it by sending the option number:
+For any worker reported `blocked` (or `trust` / `bypass`), apply judgment (and any guidance the user gave), then clear it with `intercomm_approve` — it selects the correct option for whichever dialog the pane is on:
 
-```bash
-tmux send-keys -t <session> "1" Enter    # 1 = Yes, 3 = No
+```
+intercomm_approve(worker: "worker-1")
 ```
 
-Apply judgment (and any guidance the user gave) before approving. Spawn with `--bypass` to skip approvals entirely.
+Spawn with `perm_mode: "bypassPermissions"` to skip approvals entirely.
 
 ### Delegation flow
 
 1. **Record the task.** Use `intercomm_send(to, message, type: "task")` to write the assignment to the DB.
-2. **Wake the worker.** Use `tmux send-keys -t <pane> "instruction" Enter` to prompt the worker to register (if new) and read its task.
-3. **Monitor.** Check worker output via `tmux capture-pane` or read InterComm messages via `intercomm_read`.
-4. **Answer questions.** When you see `question` messages, respond with `intercomm_send(to, message, type: "answer")` and wake the worker via tmux.
+2. **Wake the worker.** Use `intercomm_wake(worker, message)` to prompt the worker to register (if new) and read its task.
+3. **Monitor.** Read InterComm messages via `intercomm_read`, or check pane state via `intercomm_scan`.
+4. **Answer questions.** When you see `question` messages, respond with `intercomm_send(to, message, type: "answer")` and wake the worker via `intercomm_wake`.
 5. **Broadcast coordination.** Use `intercomm_broadcast` for information that affects all workers.
 6. **Housekeeping.** Call `intercomm_clear` periodically to keep the message table bounded.
 
 ### Waking a new worker (full sequence)
 
-```bash
-# 1. Send registration + task read instruction
-# IMPORTANT: Always send an extra Enter to ensure the prompt is submitted in Claude Code
-tmux send-keys -t 1:0.0 "You are part of an InterComm coordination system. Register as a worker by calling intercomm_register(). After registering, call intercomm_read() to get your task. Do NOT ask the user anything - all communication goes through InterComm to the master." Enter Enter
+`intercomm_spawn` already wakes the workers it creates. To (re)wake one yourself — e.g. after `wake: false`, or to hand a worker its next task — use `intercomm_wake` (it resolves the worker id to its pane and handles the TUI submit):
+
+```
+intercomm_wake(worker: "worker-1", message: "You are part of an InterComm coordination system. Register as a worker by calling intercomm_register(). After registering, call intercomm_read() to get your task. Do NOT ask the user anything — all communication goes through InterComm to the master.")
 ```
 
-Then separately record the task in the DB so the worker picks it up on `intercomm_read`:
+Record the task in the DB first (or alongside) so the worker picks it up on `intercomm_read`:
 ```
 intercomm_send(to: "worker-1", message: "task details...", type: "task")
 ```

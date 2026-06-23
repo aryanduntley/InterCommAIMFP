@@ -52,7 +52,7 @@ Local-only coordination system for multiple Claude Code instances working on the
 
 ## Usage
 
-The master spawns and controls workers itself — no manual tmux setup required. The helper scripts live in `scripts/`.
+The master spawns and controls workers itself through InterComm's MCP tools — no shell scripts and no manual tmux setup required. (The `scripts/*.sh` helpers remain as a dev-only fallback; see [Dev scripts](#dev-scripts).)
 
 ### 1. Register the master
 
@@ -62,53 +62,57 @@ In your main Claude Code instance, register as master (via the `intercomm_regist
 
 From the master, run:
 
-```bash
-scripts/spawn-workers.sh 3
+From the master, call the **`intercomm_spawn`** tool:
+
+```
+intercomm_spawn(count: 3)
 ```
 
-This creates 3 detached tmux sessions (`worker-1`, `worker-2`, `worker-3`), launches Claude Code in each (in the project dir, so they load `.mcp.json` + `CLAUDE.md`), waits for each to boot, and auto-wakes them to register and read their task. Each worker reports its `tmux-session ↔ worker-N` mapping back to the master, so the master knows which pane is which.
+This creates 3 detached tmux sessions (`worker-1`, `worker-2`, `worker-3`), launches Claude Code in each (with `INTERCOMM_DB_ROOT` pinned to the shared bus, so they load `.mcp.json` + `CLAUDE.md`), auto-clears the first-run trust / MCP-approval dialogs, and wakes each to register and read its task. It returns immediately with the session list — workers self-register asynchronously, so call `intercomm_status` to confirm the `session ↔ worker-N` mapping.
 
-Useful options:
+Useful parameters:
 
-| Option | Effect |
+| Param | Effect |
 |---|---|
-| `--bypass` | Launch workers in `bypassPermissions` mode (fully hands-off; no approval needed) |
-| `--perm-mode <mode>` | Set `claude --permission-mode` explicitly (default: `acceptEdits`) |
-| `--no-wake` | Create + launch only; master wakes them itself later |
-| `--prefix <name>` | tmux session-name prefix (default: `worker`) |
-| `--project <dir>` | Project dir to launch in (default: current dir) |
-| `--ready-timeout <s>` | Boot wait per worker (default: 30) |
+| `worktrees: true` | Launch each worker in its own isolated git worktree (branch-per-agent) |
+| `worktree_base` | Git ref each worktree checks out detached (default: `main`) |
+| `bootstrap` | Setup command run inside each new worktree (e.g. `npm install`) |
+| `perm_mode` | `claude --permission-mode` (default: `acceptEdits`; `bypassPermissions` for fully hands-off) |
+| `prefix` | tmux session-name prefix (default: `worker`) |
+| `ready_timeout` | Per-session seconds to clear boot dialogs (default: 20) |
+| `wake: false` | Create + launch only; wake them yourself later via `intercomm_wake` |
 
 ### 3. Approve flagged permission prompts
 
-In the default `acceptEdits` mode, workers auto-accept file edits but **pause on Bash and other tools**. A blocked worker is frozen and cannot report over InterComm, so the master polls for them:
+In the default `acceptEdits` mode, workers auto-accept file edits but **pause on Bash and other tools**. A blocked worker is frozen and cannot report over InterComm, so the master polls for them with **`intercomm_scan`**:
 
-```bash
-scripts/scan-workers.sh
+```
+intercomm_scan()
 ```
 
-For any worker reported as `blocked`, the scan prints the pending command and how to answer it. Approve (or deny) by sending the option number:
+It reports each worker pane's state (`blocked`, `trust`, `bypass`, `ready`, `running`, `idle`). Clear any pane that needs attention with **`intercomm_approve`**, which selects the right option for whichever dialog it's on:
 
-```bash
-tmux send-keys -t worker-1 "1" Enter    # 1 = Yes, 3 = No
+```
+intercomm_approve(worker: "worker-1")
 ```
 
-(Verified: the master can read a worker's permission dialog via `tmux capture-pane` and select an option via `tmux send-keys`.) To skip approvals entirely, spawn with `--bypass`.
+To skip approvals entirely, spawn with `perm_mode: "bypassPermissions"`.
 
 ### 4. Let it run, then tear down
 
-The master delegates via `intercomm_send(type: "task")`, wakes workers via `tmux send-keys`, monitors with `tmux capture-pane` / `intercomm_read` / `scan-workers.sh`, and collects results. When done:
+The master delegates via `intercomm_send(type: "task")`, wakes workers via **`intercomm_wake`**, monitors with `intercomm_scan` / `intercomm_read`, and collects results. When done, **`intercomm_teardown`** kills the sessions, removes the worktrees, and reaps the registry in one call:
 
-```bash
-scripts/kill-workers.sh
+```
+intercomm_teardown()                 # pass worktrees: true if you spawned with worktrees
 ```
 
-### Tips
+### Dev scripts
 
-- **Extra Enter for prompt submission:** When waking workers manually via `tmux send-keys`, send an extra `Enter` so the prompt actually submits in Claude Code: `tmux send-keys -t <pane> "message" Enter Enter`. (The spawn script already does this.)
-- **Manual alternative:** You can still create sessions by hand (`tmux new-session -d -s worker-1 -c /path/to/project; tmux send-keys -t worker-1 "claude --permission-mode acceptEdits" Enter`) if you prefer.
+`scripts/spawn-workers.sh`, `scan-workers.sh`, and `kill-workers.sh` predate the tools and remain for local development / debugging only — they are **not** a runtime dependency. The MCP tools above are the supported path when InterComm is dropped into any project as an MCP server. (Claude Code's TUI needs a double `Enter` to submit a prompt; the tools and scripts both handle that for you.)
 
-## MCP Tools (7 total)
+## MCP Tools (16 total)
+
+**Identity & messaging**
 
 | Tool | Description |
 |---|---|
@@ -119,6 +123,25 @@ scripts/kill-workers.sh
 | `intercomm_status` | Show all instances and their state. |
 | `intercomm_signoff` | Cleanly deactivate this instance before shutting down. |
 | `intercomm_clear` | Delete old messages (master-only). |
+
+**Orchestration (master-only) — the tool-driven lifecycle, no shell scripts**
+
+| Tool | Description |
+|---|---|
+| `intercomm_spawn` | Spawn N workers in detached tmux sessions; launch claude (optionally one git worktree each), auto-clear boot dialogs, wake to self-register. Non-blocking. |
+| `intercomm_wake` | Push a prompt into a worker's pane (resolves a worker id or raw tmux target). |
+| `intercomm_scan` | Report each worker pane's state (blocked / trust / bypass / ready / running / idle). |
+| `intercomm_approve` | Clear a worker's blocking dialog (trust / MCP-approval / bypass / permission prompt). |
+| `intercomm_teardown` | Kill worker sessions, remove their worktrees, and reap the instance rows in one call. |
+
+**Worktree registry (master-only) — branch-per-agent isolation**
+
+| Tool | Description |
+|---|---|
+| `intercomm_worktree_add` | Create an isolated git worktree (detached) for a worker and register it. |
+| `intercomm_worktree_list` | List registered worktrees and their lifecycle status (the merge-queue view). |
+| `intercomm_worktree_set_status` | Update a worktree's status; record the branch a worker reported back. |
+| `intercomm_worktree_remove` | Remove a worker's git worktree and mark it removed. |
 
 ## Message Types
 
@@ -133,7 +156,7 @@ scripts/kill-workers.sh
 
 ## Storage
 
-All state is stored in `.intercomm-aimfp/intercomm.db` (SQLite, WAL mode) created in the project root. Three tables: `instances`, `messages`, `read_cursors`.
+All state is stored in `.intercomm-aimfp/intercomm.db` (SQLite, WAL mode) created in the project root. Four tables: `instances` (incl. `tmux_target` for wake/scan/approve), `messages`, `read_cursors` (monotonic `last_read_seq` cursor), and `worktrees` (the branch-per-agent registry).
 
 ## Stale Detection
 

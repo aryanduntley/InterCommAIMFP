@@ -51,18 +51,24 @@ export const findLowestAvailableWorkerName = (instances: readonly Instance[]): s
 
 // --- IO: Instance operations ---
 
-export const registerInstance = (id: string, role: Role, sessionId: string): Instance => {
+export const registerInstance = (
+  id: string,
+  role: Role,
+  sessionId: string,
+  tmuxTarget: string = "",
+): Instance => {
   const now = nowMs();
   execute(
-    `INSERT OR REPLACE INTO instances (id, role, active, last_active, registered_at, session_id)
-     VALUES (?, ?, 1, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO instances (id, role, active, last_active, registered_at, session_id, tmux_target)
+     VALUES (?, ?, 1, ?, ?, ?, ?)`,
     id,
     role,
     now,
     now,
     sessionId,
+    tmuxTarget,
   );
-  return { id, role, active: true, lastActive: now, registeredAt: now, sessionId };
+  return { id, role, active: true, lastActive: now, registeredAt: now, sessionId, tmuxTarget };
 };
 
 export const touchInstance = (id: string): void => {
@@ -75,6 +81,15 @@ export const deactivateInstance = (id: string): void => {
 
 export const deactivateAll = (): void => {
   execute(`UPDATE instances SET active = 0`);
+};
+
+// Hard-remove an instance row and its read cursor. deactivate only flips active=0
+// (preserving the worker-N slot); reap fully frees the name. teardown reaps killed
+// workers so a best-effort exit-cleanup that never ran cannot leave a stale
+// active=1 row that drifts the next worker's auto-assigned number (note #31).
+export const reapInstance = (id: string): void => {
+  execute(`DELETE FROM instances WHERE id = ?`, id);
+  execute(`DELETE FROM read_cursors WHERE instance_id = ?`, id);
 };
 
 export const getInstance = (id: string): Instance | undefined => {
@@ -103,15 +118,16 @@ export const getActiveMaster = (): Instance | undefined => {
 export const registerAs = (
   role: Role,
   sessionId: string,
+  tmuxTarget: string = "",
 ): Instance => {
   if (role === "master") {
     deactivateAll();
-    return registerInstance("master", "master", sessionId);
+    return registerInstance("master", "master", sessionId, tmuxTarget);
   }
 
   const allInstances = getAllInstances();
   const workerName = findLowestAvailableWorkerName(allInstances);
-  return registerInstance(workerName, "worker", sessionId);
+  return registerInstance(workerName, "worker", sessionId, tmuxTarget);
 };
 
 // --- IO: Message operations ---
@@ -145,26 +161,27 @@ export const readNewMessages = (
     : (queryOne<CursorRow>(
         `SELECT * FROM read_cursors WHERE instance_id = ?`,
         instanceId,
-      )?.last_read_ts ?? 0);
+      )?.last_read_seq ?? 0);
 
-  const rows = queryAll<MessageRow>(
-    `SELECT * FROM messages
+  const rows = queryAll<MessageRow & { seq: number }>(
+    `SELECT rowid AS seq, * FROM messages
      WHERE (to_id = ? OR to_id = 'all')
        AND from_id != ?
-       AND ts > ?
-     ORDER BY ts`,
+       AND rowid > ?
+     ORDER BY rowid`,
     instanceId,
     instanceId,
     cursor,
   );
 
-  // Update cursor to latest message timestamp
+  // Advance cursor to the highest rowid seen. rowid is monotonic per insert, so
+  // same-millisecond messages can no longer slip past a `ts >` boundary.
   if (rows.length > 0) {
-    const maxTs = rows[rows.length - 1]!.ts;
+    const maxSeq = rows[rows.length - 1]!.seq;
     execute(
-      `INSERT OR REPLACE INTO read_cursors (instance_id, last_read_ts) VALUES (?, ?)`,
+      `INSERT OR REPLACE INTO read_cursors (instance_id, last_read_seq) VALUES (?, ?)`,
       instanceId,
-      maxTs,
+      maxSeq,
     );
   }
 

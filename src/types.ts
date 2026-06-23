@@ -17,6 +17,7 @@ export type Instance = {
   readonly lastActive: number;
   readonly registeredAt: number;
   readonly sessionId: string;
+  readonly tmuxTarget: string;
 };
 
 export type Message = {
@@ -30,7 +31,7 @@ export type Message = {
 
 export type ReadCursor = {
   readonly instanceId: string;
-  readonly lastReadTs: number;
+  readonly lastReadSeq: number;
 };
 
 // Row types matching SQLite schema (snake_case columns)
@@ -41,6 +42,7 @@ export type InstanceRow = {
   last_active: number;
   registered_at: number;
   session_id: string;
+  tmux_target: string;
 };
 
 export type MessageRow = {
@@ -54,7 +56,7 @@ export type MessageRow = {
 
 export type CursorRow = {
   instance_id: string;
-  last_read_ts: number;
+  last_read_seq: number;
 };
 
 // Conversion helpers (pure)
@@ -65,6 +67,7 @@ export const instanceFromRow = (row: InstanceRow): Instance => ({
   lastActive: row.last_active,
   registeredAt: row.registered_at,
   sessionId: row.session_id,
+  tmuxTarget: row.tmux_target,
 });
 
 export const messageFromRow = (row: MessageRow): Message => ({

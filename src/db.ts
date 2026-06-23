@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS instances (
   active INTEGER NOT NULL DEFAULT 1,
   last_active INTEGER NOT NULL,
   registered_at INTEGER NOT NULL,
-  session_id TEXT NOT NULL DEFAULT ''
+  session_id TEXT NOT NULL DEFAULT '',
+  tmux_target TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -36,7 +37,7 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE TABLE IF NOT EXISTS read_cursors (
   instance_id TEXT NOT NULL,
-  last_read_ts INTEGER NOT NULL DEFAULT 0,
+  last_read_seq INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (instance_id)
 );
 
@@ -58,6 +59,31 @@ const migrateSchema = (database: DatabaseType): void => {
   const hasSessionId = columns.some((col) => col.name === "session_id");
   if (!hasSessionId) {
     database.exec("ALTER TABLE instances ADD COLUMN session_id TEXT NOT NULL DEFAULT ''");
+  }
+  // tmux_target: '<session>:<window>.<pane>' captured at register, so the master
+  // can wake/scan/approve a worker's pane (and, later, M5 escalation can wake the
+  // master). '' when the instance is not running inside tmux.
+  const hasTmuxTarget = columns.some((col) => col.name === "tmux_target");
+  if (!hasTmuxTarget) {
+    database.exec("ALTER TABLE instances ADD COLUMN tmux_target TEXT NOT NULL DEFAULT ''");
+  }
+
+  // read_cursors: millisecond-ts cursor -> monotonic rowid cursor (P0 fix).
+  // The old `ts >` comparison silently dropped same-millisecond messages that
+  // straddled a read boundary; rowid is strictly increasing per insert.
+  const cursorCols = database.prepare("PRAGMA table_info(read_cursors)").all() as { name: string }[];
+  const hasSeq = cursorCols.some((col) => col.name === "last_read_seq");
+  const hasTs = cursorCols.some((col) => col.name === "last_read_ts");
+  if (!hasSeq && hasTs) {
+    database.exec("ALTER TABLE read_cursors ADD COLUMN last_read_seq INTEGER NOT NULL DEFAULT 0");
+    // Translate each ms cursor to the highest rowid it already covered, so
+    // previously-read messages stay read (no re-delivery, no loss).
+    database.exec(
+      `UPDATE read_cursors
+         SET last_read_seq = COALESCE(
+           (SELECT MAX(rowid) FROM messages WHERE messages.ts <= read_cursors.last_read_ts), 0)`,
+    );
+    database.exec("ALTER TABLE read_cursors DROP COLUMN last_read_ts");
   }
 };
 
