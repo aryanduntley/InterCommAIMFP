@@ -20,9 +20,11 @@ Local-only coordination system for multiple Claude Code instances working on the
 
 1. The user talks to the **master** instance only.
 2. The user either tells the master "I have N tmux sessions available" or the master asks "please spin up N tmux sessions for this task."
-3. The master writes tasks to the shared DB via `intercomm_send`, then **wakes** workers via `tmux send-keys`.
-4. Workers register, read their task, do the work, and report `done` via InterComm.
+3. The master assigns work via `intercomm_assign` — a **thin-pointer task contract** that points the worker at an AIMFP work entity — and **wakes** the worker (via `intercomm_wake` / tmux send-keys).
+4. Each worker registers, reads its contract, runs `aimfp_run` in its own git worktree, continues the assigned AIMFP entity on its own branch, then reports `done` (with `branch` + `commit`) via InterComm.
 5. Workers do **not** poll. They sit idle until the master pushes a prompt via tmux.
+
+InterComm stays **AIMFP-agnostic**: it isolates files (worktrees), carries the pointer contract, and tracks status — it never reads AIMFP's DB and never runs `git merge`. The master uses AIMFP's `export_state_changeset` / `apply_state_changeset` to integrate each worker's DB tracking (see [Integration](#integration)).
 
 ## Install
 
@@ -100,17 +102,56 @@ To skip approvals entirely, spawn with `perm_mode: "bypassPermissions"`.
 
 ### 4. Let it run, then tear down
 
-The master delegates via `intercomm_send(type: "task")`, wakes workers via **`intercomm_wake`**, monitors with `intercomm_scan` / `intercomm_read`, and collects results. When done, **`intercomm_teardown`** kills the sessions, removes the worktrees, and reaps the registry in one call:
+The master delegates via **`intercomm_assign`** (which builds the thin-pointer task contract, records it, and wakes the worker), monitors with `intercomm_scan` / `intercomm_read`, and collects results. When done, **`intercomm_teardown`** kills the sessions, removes the worktrees, and reaps the registry in one call:
 
 ```
+intercomm_assign(
+  worker: "worker-1",
+  role_instructions: "AIMFP user=alice; stay within src/auth/**; report branch+commit when done",
+  target_type: "task", target_id: 42,
+)
 intercomm_teardown()                 # pass worktrees: true if you spawned with worktrees
 ```
+
+## Task Contract (thin pointer)
+
+The master does **not** ship prose instructions to a worker. It ships a small JSON **pointer** to an AIMFP work entity; the worker resolves it itself by running `aimfp_run` in its clone and continuing that entity the normal AIMFP way (its own `git_create_branch` on `aimfp-{user}-{number}`, its own tracking + validation). InterComm carries the contract as opaque message content — it never resolves the pointer and never reads `project.db`.
+
+```json
+{
+  "kind": "task_contract",
+  "v": 2,
+  "role": "worker",
+  "role_instructions": "Continue the assigned AIMFP entity. Stay within your assigned files.",
+  "aimfp_target": { "type": "task", "id": 42, "slug": "task-implement-auth-9f3a1c20" },
+  "reportBack": ["branch", "commit"]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `role` / `role_instructions` | Worker role label + free-form guidance (assigned files, a **distinct AIMFP user identity** per worker so `aimfp-{user}-{number}` branches don't collide). |
+| `aimfp_target` | The AIMFP entity to continue: `type` (task / milestone / subtask / sidequest / item) plus an integer `id` and/or a stable `slug` (at least one). |
+| `reportBack` | Fields the worker returns on `done` — at minimum `branch` + `commit`, so the master can export a changeset from the branch. |
+
+`intercomm_assign` builds this for you; `intercomm_read` shows the worker a validated summary (or an error if the contract is malformed). A worker that can't parse the contract sends a `question` and waits — it never acts on a bad contract.
+
+## Integration
+
+When a worker reports `done`, the master integrates its branch — **source and AIMFP DB state are merged by different mechanisms**:
+
+1. **Text-merge the worker's source** into `main` (normal code review / conflict resolution). The binary `project.db` is **never** git-merged.
+2. **Export the worker's DB tracking** as a semantic changeset: AIMFP `export_state_changeset(base_main_commit, branch)` — an integer-free diff keyed on stable semantic keys.
+3. **Apply it onto main**: AIMFP `apply_state_changeset(changeset)` — a 3-way merge that auto-applies non-overlapping changes, mints canonical IDs, rewrites references, and reports conflicts for the master to resolve.
+4. **Commit** merged source + updated `project.db` to main; move to the next branch.
+
+InterComm only **tracks** the lifecycle (`intercomm_worktree_list` is the master's merge-queue view); the DB merge intelligence lives entirely in AIMFP.
 
 ### Dev scripts
 
 `scripts/spawn-workers.sh`, `scan-workers.sh`, and `kill-workers.sh` predate the tools and remain for local development / debugging only — they are **not** a runtime dependency. The MCP tools above are the supported path when InterComm is dropped into any project as an MCP server. (Claude Code's TUI needs a double `Enter` to submit a prompt; the tools and scripts both handle that for you.)
 
-## MCP Tools (16 total)
+## MCP Tools (17 total)
 
 **Identity & messaging**
 
@@ -119,7 +160,8 @@ intercomm_teardown()                 # pass worktrees: true if you spawned with 
 | `intercomm_register` | Register as master or worker. Initializes DB. Workers auto-assign lowest available `worker-N` name. |
 | `intercomm_send` | Send a direct message to a specific peer. |
 | `intercomm_broadcast` | Broadcast a message to all peers. |
-| `intercomm_read` | Read all new messages since last check. Updates read cursor. |
+| `intercomm_read` | Read all new messages since last check. Updates read cursor. For `task` messages, also surfaces the parsed, validated thin-pointer contract. |
+| `intercomm_assign` | Master-only. Assign work as a thin-pointer task contract (`{role, role_instructions, aimfp_target, reportBack}`): builds it, records the `task` message, and wakes the worker. |
 | `intercomm_status` | Show all instances and their state. |
 | `intercomm_signoff` | Cleanly deactivate this instance before shutting down. |
 | `intercomm_clear` | Delete old messages (master-only). |
@@ -196,8 +238,8 @@ Claude Code requires approval for certain tool calls (e.g., running bash command
 
 This is handled, not eliminated:
 - Workers are spawned in `acceptEdits` mode by default (file edits auto-approved; Bash/other still prompt).
-- `scripts/scan-workers.sh` polls every worker pane and reports which are blocked, with the pending command.
-- The master approves via `tmux send-keys -t <session> "1" Enter` (verified: the dialog is readable via `capture-pane` and selectable via `send-keys`).
+- `intercomm_scan` polls every worker pane and reports which are blocked.
+- The master clears the dialog with `intercomm_approve` (it reads the pane via `capture-pane` and selects the right option via `send-keys`).
 
 **Reduce or remove the prompts further:**
 - Spawn with `--bypass` (`bypassPermissions`) for fully hands-off workers (use with caution — workers run anything unprompted).

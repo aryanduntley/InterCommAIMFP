@@ -1,5 +1,5 @@
-// MCP server — 16 tool handlers (register + communication + management +
-// worktrees + orchestration: spawn/wake/scan/approve/teardown).
+// MCP server — 17 tool handlers (register + communication + management +
+// worktrees + orchestration: spawn/wake/scan/approve/teardown + assign).
 // Auto-init DB at server startup
 
 import { randomUUID } from "node:crypto";
@@ -8,8 +8,15 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { dirname } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { MessageType, Role, WorktreeStatus } from "./types.js";
+import type {
+  MessageType,
+  Role,
+  WorktreeStatus,
+  AimfpTarget,
+  AimfpTargetType,
+} from "./types.js";
 import { WORKTREE_STATUSES } from "./types.js";
+import { buildTaskContract, parseTaskContract } from "./task-contract.js";
 import { worktreePath } from "./config.js";
 import { initDb, closeDb } from "./db.js";
 import { ensureDir } from "./fs-wrapper.js";
@@ -77,6 +84,22 @@ const PERM_MODES = [
   "plan",
 ] as const;
 
+// AIMFP work-hierarchy tables a thin-pointer contract may target (mirrors AimfpTargetType).
+const AIMFP_TARGET_TYPES = [
+  "task",
+  "milestone",
+  "subtask",
+  "sidequest",
+  "item",
+] as const;
+
+// Prompt pushed to a worker when intercomm_assign wakes it — points it at the
+// thin-pointer flow: read the contract, bootstrap AIMFP, continue the entity.
+const ASSIGN_WAKE_PROMPT =
+  "You have a new InterComm task. Call intercomm_read to get your task contract, " +
+  "then run aimfp_run(is_new_session=true) in your worktree and continue the assigned " +
+  "aimfp_target entity. Do NOT ask the user anything — report back to master via InterComm.";
+
 // --- Handlers ---
 
 const handleRegister = (
@@ -134,9 +157,35 @@ const handleRead = (
 
   const lines = [
     `--- ${messages.length} message(s) ---`,
-    ...messages.map(store.formatMessageForDisplay),
+    ...messages.map((m) =>
+      m.type === "task"
+        ? `${store.formatMessageForDisplay(m)}\n${formatTaskContract(m.content)}`
+        : store.formatMessageForDisplay(m),
+    ),
   ];
   return textResult(lines.join("\n"));
+};
+
+// Worker-side access to parseTaskContract: render a task message's contract as
+// a validated summary (or a parse error) so the worker never has to reach into
+// the server's source to parse it — it gets the result through intercomm_read.
+const formatTaskContract = (content: string): string => {
+  const parsed = parseTaskContract(content);
+  if (!parsed.ok) {
+    return `    ⚠ INVALID task contract: ${parsed.error} — send a question to master; do NOT act.`;
+  }
+  const c = parsed.contract;
+  const t = c.aimfp_target;
+  const ident = [
+    t.id != null ? `id=${t.id}` : null,
+    t.slug ? `slug=${t.slug}` : null,
+  ].filter(Boolean).join(", ");
+  return [
+    `    ✓ task contract (role=${c.role}):`,
+    `      aimfp_target: ${t.type} (${ident})`,
+    `      role_instructions: ${c.role_instructions}`,
+    `      reportBack: [${c.reportBack.join(", ")}]`,
+  ].join("\n");
 };
 
 const handleStatus = (state: ServerState): CallToolResult => {
@@ -173,6 +222,65 @@ const handleClear = (
 
   const deleted = store.clearOldMessages(args.keep);
   return textResult(`Cleared ${deleted} old messages (kept last ${args.keep}).`);
+};
+
+// Master-side access to buildTaskContract: assemble a thin-pointer contract from
+// structured args, record it as a `task` message, and (by default) wake the
+// worker. This is how the master assigns work without hand-authoring the JSON or
+// reaching into the server's source — the contract shape lives behind the tool.
+const handleAssign = async (
+  state: ServerState,
+  args: {
+    worker: string;
+    role: string;
+    role_instructions: string;
+    target_type: AimfpTargetType;
+    target_id?: number;
+    target_slug?: string;
+    report_back: string[];
+    wake: boolean;
+  },
+): Promise<CallToolResult> => {
+  const err = requireMaster(state);
+  if (err) return err;
+
+  const recipient = store.getInstance(args.worker);
+  if (!recipient) return errorResult(`No instance registered with id "${args.worker}"`);
+
+  const slug = args.target_slug?.trim();
+  if (args.target_id == null && !slug) {
+    return errorResult("Provide target_id and/or target_slug to point at an AIMFP entity.");
+  }
+
+  const target: AimfpTarget = {
+    type: args.target_type,
+    ...(args.target_id != null ? { id: args.target_id } : {}),
+    ...(slug ? { slug } : {}),
+  };
+  const ident = [
+    args.target_id != null ? `id=${args.target_id}` : null,
+    slug ? `slug=${slug}` : null,
+  ].filter(Boolean).join(", ");
+
+  const content = buildTaskContract({
+    role: args.role,
+    role_instructions: args.role_instructions,
+    aimfp_target: target,
+    reportBack: args.report_back,
+  });
+  store.insertMessage(state.identity!.id, args.worker, "task", content);
+
+  if (!args.wake) {
+    return textResult(
+      `Assigned ${args.target_type} (${ident}) to ${args.worker} — not woken; it reads the contract via intercomm_read.`,
+    );
+  }
+
+  const res = await orchestrate.wakeWorker(args.worker, ASSIGN_WAKE_PROMPT);
+  const wokeNote = res.resolved
+    ? `woke it (${res.target})`
+    : `could NOT wake it (no live pane: ${res.target || "—"}) — contract is persisted, wake manually`;
+  return textResult(`Assigned ${args.target_type} (${ident}) to ${args.worker}; ${wokeNote}.`);
 };
 
 // --- Worktree handlers (multi-agent parallelization addon) ---
@@ -409,6 +517,20 @@ const registerTools = (server: McpServer, state: ServerState): void => {
       keep: z.number().int().min(0).default(100).describe("Number of recent messages to retain (default: 100)"),
     },
   }, (args) => handleClear(state, args as { keep: number }));
+
+  server.registerTool("intercomm_assign", {
+    description: "Master-only. Assign work to a worker as a thin-pointer task contract: build {role, role_instructions, aimfp_target, reportBack} from these args, record it as a `task` message, and (by default) wake the worker. The worker reads it via intercomm_read, then runs aimfp_run in its worktree and continues the referenced AIMFP entity. Provide target_id and/or target_slug. InterComm never resolves the pointer — AIMFP does, worker-side.",
+    inputSchema: {
+      worker: z.string().describe("Worker id to assign (e.g. worker-1)"),
+      role: z.string().default("worker").describe("Worker role label (default: worker)"),
+      role_instructions: z.string().min(1).describe("Role guidance / hard boundaries for this worker (e.g. assigned files, a distinct AIMFP user identity so aimfp-{user}-{number} branches don't collide)"),
+      target_type: z.enum(AIMFP_TARGET_TYPES).describe("AIMFP entity table the worker continues"),
+      target_id: z.number().int().optional().describe("AIMFP entity integer id (provide this and/or target_slug)"),
+      target_slug: z.string().optional().describe("AIMFP entity stable slug (provide this and/or target_id)"),
+      report_back: z.array(z.string()).default(["branch", "commit"]).describe("Fields the worker must report on done (default: branch, commit)"),
+      wake: z.boolean().default(true).describe("Wake the worker after recording the contract (default: true)"),
+    },
+  }, (args) => handleAssign(state, args as Parameters<typeof handleAssign>[1]));
 
   // --- Worktree / orchestration tools (multi-agent addon) ---
 

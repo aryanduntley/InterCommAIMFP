@@ -87,7 +87,7 @@ Workers are subordinates. They execute, report, and stop. The master is the sole
 
 | Type | When to Use |
 |---|---|
-| `task` | Master sends to assign work. The content is a structured **task contract** (see below) — goal, constraints, validation, and report-back fields. |
+| `task` | Master sends to assign work. The content is a thin-pointer **task contract** (see below) — a role + a pointer to the AIMFP entity the worker continues, plus report-back fields. |
 | `status` | Report progress at meaningful milestones. Keep it concise: what you did, what's next. |
 | `question` | When you're blocked and need input. State what you need and from whom. |
 | `answer` | Reply to a `question`. Reference what you're answering. |
@@ -98,33 +98,27 @@ Workers are subordinates. They execute, report, and stop. The master is the sole
 
 ## Task Contract
 
-When the master assigns work, the `task` message's content is a structured **task contract** — a JSON object the worker parses before acting. InterComm carries it as opaque content; it never reads or runs any of these fields. The worker (which has the AIMFP tools) is what interprets and honors them.
+When the master assigns work, the `task` message's content is a **thin-pointer task contract** — a small JSON object the worker parses before acting. It does NOT describe the work in prose; it points at an AIMFP work entity (task/milestone/etc.) that the worker resolves itself by running `aimfp_run` in its own clone. InterComm carries it as opaque content; it never reads `project.db` and never resolves the pointer. The worker (which has the AIMFP tools) is what loads the entity and continues it the normal AIMFP way.
 
 ```json
 {
   "kind": "task_contract",
-  "v": 1,
-  "goal": "What to achieve — the single instruction.",
-  "constraints": ["Hard boundaries the worker must NOT cross."],
-  "validation": ["Checks/commands to run before reporting done, e.g. 'npm run build'."],
-  "output": "The one reviewable outcome this task produces.",
-  "branchConvention": "aimfp-worker-{n}-{seq}",
-  "requiredDirectives": ["git_create_branch"],
-  "reportBack": ["branch_name", "commit_hash", "done"]
+  "v": 2,
+  "role": "worker",
+  "role_instructions": "Continue the assigned AIMFP entity. Stay within your assigned files. Report branch + commit when done.",
+  "aimfp_target": { "type": "task", "id": 42, "slug": "task-implement-auth-9f3a1c20" },
+  "reportBack": ["branch", "commit"]
 }
 ```
 
 | Field | Meaning |
 |---|---|
-| `goal` | The instruction / outcome to achieve. |
-| `constraints` | Hard boundaries — the worker must not cross these (e.g. "do not touch src/store.ts"). |
-| `validation` | Checks the worker runs and must pass **before** reporting `done` (e.g. build/tests). |
-| `output` | The single reviewable outcome (one outcome per task — keep tasks atomic). |
-| `branchConvention` | Branch-name template the worker's branch must follow. |
-| `requiredDirectives` | AIMFP directive **names** the worker must run (e.g. `git_create_branch`). InterComm never runs them — the worker does. |
-| `reportBack` | The fields the worker must include when it reports completion. |
+| `role` | The worker's role label (e.g. `worker`). |
+| `role_instructions` | Free-form role guidance / enforcement for this worker. |
+| `aimfp_target` | Pointer to the AIMFP work entity to continue: `type` is the table (`task`/`milestone`/`subtask`/`sidequest`/`item`) and identity is an integer `id` and/or a stable `slug` (at least one present). The worker resolves it via `aimfp_run` — InterComm never does. |
+| `reportBack` | The fields the worker must include when it reports completion (at minimum `branch` and `commit`, so the master can export a changeset from the branch). |
 
-A worker that cannot parse the contract (not JSON, wrong `kind`/`v`, or missing/malformed fields) must **not** act on it — send a `question` to the master describing the problem and wait.
+The worker does NOT receive prose goal/constraints/validation in the contract — it gets those from the AIMFP entity itself after `aimfp_run`. A worker that cannot parse the contract (not JSON, wrong `kind`/`v`, or a missing/malformed field — including a `v:1` contract from the superseded prose model) must **not** act on it — send a `question` to the master describing the problem and wait.
 
 ---
 
@@ -162,7 +156,7 @@ Spawn with `perm_mode: "bypassPermissions"` to skip approvals entirely.
 
 ### Delegation flow
 
-1. **Record the task.** Use `intercomm_send(to, message, type: "task")` to write the assignment to the DB.
+1. **Record the task.** Write the assignment as a thin-pointer task contract (`{role, role_instructions, aimfp_target, reportBack}`, see **Task Contract** above) into a `task` message via `intercomm_send(to, message, type: "task")`. Point `aimfp_target` at the AIMFP entity (by `id` and/or `slug`) you want that worker to continue, and give each worker a **distinct AIMFP user identity** in its `role_instructions` so their `aimfp-{user}-{number}` branches never collide. Assign disjoint files/modules per worker to keep changesets conflict-free at merge time.
 2. **Wake the worker.** Use `intercomm_wake(worker, message)` to prompt the worker to register (if new) and read its task.
 3. **Monitor.** Read InterComm messages via `intercomm_read`, or check pane state via `intercomm_scan`.
 4. **Answer questions.** When you see `question` messages, respond with `intercomm_send(to, message, type: "answer")` and wake the worker via `intercomm_wake`.
@@ -177,10 +171,38 @@ Spawn with `perm_mode: "bypassPermissions"` to skip approvals entirely.
 intercomm_wake(worker: "worker-1", message: "You are part of an InterComm coordination system. Register as a worker by calling intercomm_register(). After registering, call intercomm_read() to get your task. Do NOT ask the user anything — all communication goes through InterComm to the master.")
 ```
 
-Record the task in the DB first (or alongside) so the worker picks it up on `intercomm_read`:
+Prefer `intercomm_assign` to hand a worker its task — it builds the thin-pointer contract, records the `task` message, and wakes the worker in one call:
 ```
-intercomm_send(to: "worker-1", message: "task details...", type: "task")
+intercomm_assign(worker: "worker-1", role_instructions: "AIMFP user=alice; stay within src/auth/**", target_type: "task", target_id: 42)
 ```
+
+---
+
+## Master Integration / Merge Queue
+
+When a worker reports `done` (with its `branch` + `commit`), you integrate its work into `main`. **Source and AIMFP DB state are merged by *different* mechanisms — never git-merge the binary `project.db`.** Integrate one branch at a time, in order:
+
+1. **Mark it merging.** `intercomm_worktree_set_status(worker_id, status: "merging", branch: <branch>)`. `intercomm_worktree_list` is your queue view.
+2. **Text-merge the SOURCE** into the latest `main` — AIMFP `git_detect_conflicts(branch, main)` then `git_merge_branch(branch)`, **for source only**, resolving ordinary code conflicts with FP-purity review. Each merge moves `main`, so a now-stale branch should sync/rebase before its turn.
+3. **Export the DB changeset.** AIMFP `export_state_changeset(base_main_commit, branch, worker_id)` — a pure read of the worker's *committed* `project.db`. `base_main_commit` is the branch **point** (where the worker branched from), NOT current main — compute it with `git merge-base main <branch>` *before* this branch's source merge moves main. (`intercomm_worktree_list` shows each worktree's `base` ref.) Check `data.warnings` (e.g. rows missing a slug → run `backfill_semantic_keys` on main and recommit).
+4. **Apply it onto main.** AIMFP `apply_state_changeset(changeset)` — a 3-way semantic merge onto the working `project.db` (which *is* current-main, since you've already merged source and are on main). It backs up first, auto-applies non-overlapping changes, mints canonical IDs, rewrites references, and **returns every conflict — it never guesses.**
+5. **Resolve conflicts.** For each entry in `data.conflicts`: fix `main` directly, or send the branch back to the worker (`intercomm_worktree_set_status(... "queued")` + assign a revision via `intercomm_assign`), or escalate to the user. A *conflict* is not a failure — the safe subset already applied; a genuine *exception* rolls back and restores `data.backup_path`. If a delete was blocked by an edge the same changeset also removes, just re-run `apply_state_changeset(changeset)` (idempotent — apply-to-fixpoint).
+6. **Commit + advance.** Commit the merged source **and** the updated `project.db` to `main`. Set status `merged` (or `verifying` first if you run a verification command, then `merged` / `failed`). Move to the next branch.
+7. **After all branches:** `aimfp_status` to confirm state, then `git_sync_state` to update the stored commit hash.
+
+Optionally, **before** integrating a batch, run AIMFP `detect_state_conflicts([{branch, base_commit, worker_id}, ...])` to spot entities/edges touched by more than one branch, and re-partition or reorder before applying anything.
+
+InterComm only **tracks** this lifecycle (`worktrees.status`: queued → merging → verifying → merged / conflict / failed). The merge intelligence — semantic apply, ID minting, `merge_history` — lives entirely in AIMFP. InterComm never reads `project.db` and never runs `git merge` on it.
+
+### Keeping conflicts rare (partition before you parallelize)
+
+Good partitioning turns most changesets into pure additions. Before you fan out:
+
+- **Disjoint file/module ownership (primary lever).** Give each worker a non-overlapping region, stated in its `role_instructions`. Eliminates cross-branch rename-vs-edit collisions and concurrent inbound edges.
+- **Delegate the full dependency closure for structural work.** When a task renames/moves/deletes something, also assign its referrers (call sites), so the change + its edge updates land in one self-consistent changeset.
+- **Contract rule:** a worker must **not** add edges into entities it doesn't own.
+- **Serialize codebase-wide refactors.** Run a sweeping rename as a solo task, integrate it first, then fan out additive work onto the result.
+- **Order integration:** land additive branches before structural/deleting ones.
 
 ---
 
@@ -189,16 +211,16 @@ intercomm_send(to: "worker-1", message: "task details...", type: "task")
 As a worker, you execute tasks and report back. **You operate autonomously — do NOT ask the user for input or confirmation. All communication goes through InterComm to the master. The user interacts only with the master instance.**
 
 1. **Register.** Call `intercomm_register()` when prompted by the master via tmux.
-2. **Read your task.** Call `intercomm_read` to get your assignment, then parse the **task contract** (see above) from the `task` message content. If it does not parse — not JSON, wrong `kind`/`v`, or a missing/malformed field — do NOT act: send a `question` to the master describing the problem and wait.
-3. **Acknowledge.** Send a `status` message confirming you've started: `intercomm_send(to: "master", message: "Starting on X", type: "status")`.
-4. **Run required directives first.** Run every directive named in `requiredDirectives` before editing — in particular run AIMFP `git_create_branch` **inside your own worktree** so your work lands on a branch matching `branchConvention` (e.g. `aimfp-worker-1-001`). Capture the resulting branch name and commit hash for your report.
-5. **Do the work — within the contract.** Execute `goal` autonomously to produce the single `output`. Treat every entry in `constraints` as a hard boundary you must not cross. No need to poll — just work.
-6. **Validate before done.** Run every check in `validation` (e.g. `npm run build`, tests). Only proceed to report `done` if they all pass. If validation fails and you cannot fix it within the contract, send a `question` to the master instead.
+2. **Read your task.** Call `intercomm_read` to get your assignment, then parse the thin-pointer **task contract** (see above) from the `task` message content to recover your `aimfp_target` and `role_instructions`. If it does not parse — not JSON, wrong `kind`/`v` (e.g. a superseded `v:1` contract), or a missing/malformed field — do NOT act: send a `question` to the master describing the problem and wait.
+3. **Bootstrap AIMFP.** In your own worktree clone, call `aimfp_run(is_new_session=true)` under your **own distinct AIMFP user identity** (the master assigns each worker a different one so `aimfp-{user}-{number}` branches never collide). This loads the project and the context for your `aimfp_target` — the entity carries its own goal, scope, flows, and validation. You do NOT get those from the contract.
+4. **Acknowledge.** Send a `status` message confirming you've started: `intercomm_send(to: "master", message: "Starting on <target>", type: "status")`.
+5. **Branch + work the entity — the normal AIMFP way.** Run AIMFP `git_create_branch` inside your worktree (it names the branch `aimfp-{user}-{number}` from your identity), then continue the `aimfp_target` entity exactly as AIMFP prescribes: create/continue its tasks+items, do the full file coding loop (reserve → write FP code → finalize → flows/modules/interactions/types). Honor `role_instructions` as hard boundaries (e.g. stay within your assigned files; never add edges into entities you don't own). No need to poll — just work.
+6. **Validate + commit.** Run the project's checks (e.g. `npm run build`, tests) and satisfy the AIMFP completion gate (`get_task_context` — every finalized file has tracked functions). Then commit your source **and** the updated `project.db` on your branch — the master exports the changeset from your committed branch, so uncommitted tracking is invisible to it. If you cannot pass validation within your scope, send a `question` to the master instead.
 7. **Ask when blocked.** Send a `question` to the master via InterComm: `intercomm_send(to: "master", message: "question", type: "question")`. Then wait — the master will wake you via tmux when the answer is ready.
-8. **Signal completion.** Send `intercomm_send(to: "master", message: ..., type: "done")` including every field named in `reportBack` — at minimum `branch_name` and `commit_hash` so the master can record your branch and queue it for merge.
+8. **Signal completion.** Send `intercomm_send(to: "master", message: ..., type: "done")` including every field named in `reportBack` — at minimum `branch` and `commit` so the master can export + apply your AIMFP changeset and merge your source.
 9. **Stop.** After sending `done`, do nothing. The master will wake you via tmux if there's more work.
 
-**Do NOT poll `intercomm_read` in a loop. Do NOT ask the user anything. Do NOT cross a `constraint` or report `done` before `validation` passes. Just work, validate, report, and stop.**
+**Do NOT poll `intercomm_read` in a loop. Do NOT ask the user anything. Do NOT cross a boundary in `role_instructions`, and do NOT report `done` before validation passes and your branch (source + `project.db`) is committed. Just work, validate, commit, report, and stop.**
 
 ---
 

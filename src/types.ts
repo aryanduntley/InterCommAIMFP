@@ -85,28 +85,42 @@ export type ParsedArgs = {
   readonly flags: Readonly<Record<string, string | boolean>>;
 };
 
-// --- Task contract (Phase 2: directive-driven tasking) ---
+// --- Task contract (Phase 2: directive-driven tasking, thin-pointer model) ---
 //
 // The JSON payload a master sends a worker inside messages.content (type
 // "task"). InterComm stays AIMFP-agnostic: it only carries this contract as
-// opaque message content — the worker is what honors requiredDirectives and
-// runs validation. Fields mirror the ctx task-contract discipline:
+// opaque message content — it never resolves the pointer and never reads
+// project.db. On wake, the worker runs aimfp_run(is_new_session=true) in its
+// own clone and continues the referenced AIMFP entity the normal way (its own
+// git_create_branch on aimfp-{user}-{number}, its own tracking + validation).
 //
-//   goal               — the instruction / outcome to achieve
-//   constraints        — hard boundaries the worker must not cross
-//   validation         — checks/commands the worker runs before reporting done
-//   output             — the single reviewable outcome (one outcome per task)
-//   branchConvention   — branch-name template (e.g. aimfp-worker-{n}-{seq})
-//   requiredDirectives — AIMFP directive names the worker must run (e.g.
-//                        git_create_branch) — names only; InterComm never runs them
-//   reportBack         — field names the worker must send back on completion
+//   role              — the worker's role label (e.g. "worker")
+//   role_instructions — free-form role guidance / enforcement for the worker
+//   aimfp_target      — pointer to the AIMFP work entity the worker continues
+//   reportBack        — field names the worker sends back on completion (e.g.
+//                       "branch", "commit") so the master can export a changeset
+
+// The AIMFP work-hierarchy tables a contract can point at.
+export type AimfpTargetType =
+  | "task"
+  | "milestone"
+  | "subtask"
+  | "sidequest"
+  | "item";
+
+// Pointer to an AIMFP work entity. `type` names the table; identity is an
+// integer `id` and/or a stable `slug` — at least one must be present. InterComm
+// carries this opaquely; AIMFP resolves it on the worker side via aimfp_run.
+export type AimfpTarget = {
+  readonly type: AimfpTargetType;
+  readonly id?: number;
+  readonly slug?: string;
+};
+
 export type TaskContract = {
-  readonly goal: string;
-  readonly constraints: readonly string[];
-  readonly validation: readonly string[];
-  readonly output: string;
-  readonly branchConvention: string;
-  readonly requiredDirectives: readonly string[];
+  readonly role: string;
+  readonly role_instructions: string;
+  readonly aimfp_target: AimfpTarget;
   readonly reportBack: readonly string[];
 };
 
