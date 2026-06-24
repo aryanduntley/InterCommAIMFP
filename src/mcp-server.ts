@@ -1,6 +1,7 @@
-// MCP server — 17 tool handlers (register + communication + management +
-// worktrees + orchestration: spawn/wake/scan/approve/teardown + assign).
-// Auto-init DB at server startup
+// MCP server — 18 tool handlers (register + communication + management +
+// get_protocol + worktrees + orchestration: spawn/wake/scan/approve/teardown +
+// assign). The coordination protocol is auto-injected via the `instructions`
+// field at construction. Auto-init DB at server startup.
 
 import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -18,6 +19,7 @@ import type {
 import { WORKTREE_STATUSES } from "./types.js";
 import { buildTaskContract, parseTaskContract } from "./task-contract.js";
 import { worktreePath } from "./config.js";
+import { loadProtocol } from "./protocol.js";
 import { initDb, closeDb } from "./db.js";
 import { ensureDir } from "./fs-wrapper.js";
 import { addWorktree, removeWorktree } from "./git-wrapper.js";
@@ -511,6 +513,10 @@ const registerTools = (server: McpServer, state: ServerState): void => {
     description: "Cleanly deactivate this instance and sign off. Use before shutting down.",
   }, () => handleSignoff(state));
 
+  server.registerTool("intercomm_get_protocol", {
+    description: "Re-read the full InterComm master/worker coordination protocol on demand. The same text is auto-injected as the server's MCP instructions on connect; use this to refresh it after a long session / context compaction. No registration required.",
+  }, () => textResult(loadProtocol()));
+
   server.registerTool("intercomm_clear", {
     description: "Delete messages older than threshold. Master-only.",
     inputSchema: {
@@ -621,9 +627,14 @@ export const createAndRunServer = async (root: string): Promise<void> => {
   // Auto-init DB at startup
   initDb(root);
 
+  // The master/worker coordination protocol is delivered to every connected
+  // instance automatically via the `instructions` field (the same mechanism
+  // AIMFP uses for its rules) — no per-project CLAUDE.md embedding or paste.
   const server = new McpServer({
     name: "intercomm-aimfp",
     version: "0.4.0",
+  }, {
+    instructions: loadProtocol(),
   });
 
   registerTools(server, state);

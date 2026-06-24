@@ -50,7 +50,14 @@ InterComm stays **AIMFP-agnostic**: it isolates files (worktrees), carries the p
    ```
    Replace `/absolute/path/to/intercommAIMFP` with the actual path on your machine.
 
-4. Add the contents of `system-prompt.md` to each Claude Code instance's system prompt (paste it into your Claude settings or CLAUDE.md).
+That's it — there is **no protocol to paste**. The master/worker coordination
+protocol is delivered automatically via the MCP server's `instructions` field the
+moment any instance connects (master or worker), the same way AIMFP injects its
+rules. It travels with the server into every project, so your `CLAUDE.md` stays
+yours (e.g. AIMFP-only) and is never touched. Any instance can re-read the full
+protocol on demand with the `intercomm_get_protocol` tool — useful after a long
+session compacts context. (`system-prompt.md` in this repo is the single in-repo
+source for that injected text; edit it there and rebuild.)
 
 ## Usage
 
@@ -151,7 +158,7 @@ InterComm only **tracks** the lifecycle (`intercomm_worktree_list` is the master
 
 `scripts/spawn-workers.sh`, `scan-workers.sh`, and `kill-workers.sh` predate the tools and remain for local development / debugging only — they are **not** a runtime dependency. The MCP tools above are the supported path when InterComm is dropped into any project as an MCP server. (Claude Code's TUI needs a double `Enter` to submit a prompt; the tools and scripts both handle that for you.)
 
-## MCP Tools (17 total)
+## MCP Tools (18 total)
 
 **Identity & messaging**
 
@@ -165,6 +172,7 @@ InterComm only **tracks** the lifecycle (`intercomm_worktree_list` is the master
 | `intercomm_status` | Show all instances and their state. |
 | `intercomm_signoff` | Cleanly deactivate this instance before shutting down. |
 | `intercomm_clear` | Delete old messages (master-only). |
+| `intercomm_get_protocol` | Re-read the full master/worker coordination protocol on demand (the same text auto-injected via the server's MCP `instructions` on connect). No registration required. |
 
 **Orchestration (master-only) — the tool-driven lifecycle, no shell scripts**
 

@@ -12,6 +12,10 @@
     "build": "tsc",
     "dev": "tsc --watch"
   },
+  "files": [
+    "dist",
+    "system-prompt.md"
+  ],
   "keywords": [
     "claude",
     "ipc",
