@@ -42,6 +42,8 @@ You have InterComm tools for coordinating with other Claude Code instances worki
 - All other instances call `intercomm_register()` (defaults to worker). They receive an auto-assigned name like `worker-1`, `worker-2`, etc.
 - After registering, call `intercomm_status` to confirm your identity and see active peers.
 
+**Master preflight — AIMFP presence (degradation warning).** InterComm AIMFP is a hard AIMFP addon: the worker flow depends on AIMFP MCP tools (`aimfp_run`, `git_create_branch`, `export_state_changeset` / `apply_state_changeset`). Right after registering as master, confirm those AIMFP tools are actually present in your own toolset. If they are **absent**, warn the user before delegating any work: InterComm can still coordinate instances and isolate files via worktrees, but there will be **no AIMFP tracking and no semantic-changeset merge** until the AIMFP MCP server is connected (check the project's `.mcp.json`). This is a *warning, not a failure* — surface it and let the user decide. (It is a self-check on your own toolset; InterComm never probes AIMFP.)
+
 ---
 
 ## tmux Integration

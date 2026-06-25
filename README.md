@@ -2,7 +2,7 @@
 
 Local-only coordination system for multiple Claude Code instances working on the same project. One instance is master, the rest are workers. The master delegates tasks and controls workers via tmux. All state lives in a single SQLite database — no servers, no HTTP, no sockets.
 
-**Requires tmux.**
+**Requires tmux** and the **AIMFP MCP server**. InterComm AIMFP is a hard AIMFP addon — the worker flow runs `aimfp_run` and `git_create_branch`, and the master integrates each branch via `export_state_changeset` / `apply_state_changeset`. Without the AIMFP MCP server connected (listed in the project's `.mcp.json`), instances can still coordinate and isolate files via worktrees, but there is **no AIMFP tracking and no semantic-changeset merge**. (InterComm's own code stays AIMFP-agnostic — it never reads AIMFP's DB.)
 
 ## How It Works
 
@@ -160,7 +160,7 @@ InterComm only **tracks** the lifecycle (`intercomm_worktree_list` is the master
 
 `scripts/spawn-workers.sh`, `scan-workers.sh`, and `kill-workers.sh` predate the tools and remain for local development / debugging only — they are **not** a runtime dependency. The MCP tools above are the supported path when InterComm is dropped into any project as an MCP server. (Claude Code's TUI needs a double `Enter` to submit a prompt; the tools and scripts both handle that for you.)
 
-## MCP Tools (18 total)
+## MCP Tools (19 total)
 
 **Identity & messaging**
 
@@ -170,6 +170,7 @@ InterComm only **tracks** the lifecycle (`intercomm_worktree_list` is the master
 | `intercomm_send` | Send a direct message to a specific peer. |
 | `intercomm_broadcast` | Broadcast a message to all peers. |
 | `intercomm_read` | Read all new messages since last check. Updates read cursor. For `task` messages, also surfaces the parsed, validated thin-pointer contract. |
+| `intercomm_escalate` | **Worker→master, no polling.** Persist a question/decision to the master AND wake it in its tmux pane (the server does the wake; the worker never touches tmux). Set `needs_user` when the master must ask the human. Returns `{persisted, woke, reason?}`. |
 | `intercomm_assign` | Master-only. Assign work as a thin-pointer task contract (`{role, role_instructions, aimfp_target, reportBack}`): builds it, records the `task` message, and wakes the worker. |
 | `intercomm_status` | Show all instances and their state. |
 | `intercomm_signoff` | Cleanly deactivate this instance before shutting down. |
