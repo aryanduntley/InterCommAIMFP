@@ -154,6 +154,8 @@ When a worker reports `done`, the master integrates its branch — **source and 
 
 InterComm only **tracks** the lifecycle (`intercomm_worktree_list` is the master's merge-queue view); the DB merge intelligence lives entirely in AIMFP.
 
+> **Parallel git-worktree runs are supported and validated end-to-end** — 4 workers in isolated worktrees through the full `export_state_changeset` → `apply_state_changeset` merge chain, including concurrent shared-type conflict prediction + resolution. Each worker's AIMFP tracking is committed on its own branch (requires the worktree-aware AIMFP build). One residual AIMFP-side caveat: a worker should treat `<its worktree>/src` as the source dir even if `get_source_directory()` still returns the shared-checkout path — the worker pre-flight guard checks this.
+
 ### Dev scripts
 
 `scripts/spawn-workers.sh`, `scan-workers.sh`, and `kill-workers.sh` predate the tools and remain for local development / debugging only — they are **not** a runtime dependency. The MCP tools above are the supported path when InterComm is dropped into any project as an MCP server. (Claude Code's TUI needs a double `Enter` to submit a prompt; the tools and scripts both handle that for you.)

@@ -28,10 +28,22 @@ export const isStale = (lastActive: number, now: number = nowMs()): boolean =>
 export const formatMessageForDisplay = (msg: Message): string =>
   `[${new Date(msg.ts).toLocaleTimeString()}] (${msg.type}) ${msg.fromId} → ${msg.toId}: ${msg.content} [msg_id: ${msg.id}]`;
 
-export const formatInstanceForDisplay = (inst: Instance): string => {
+export const formatInstanceForDisplay = (
+  inst: Instance,
+  worktree?: Worktree | undefined,
+): string => {
   const status = inst.active && !isStale(inst.lastActive) ? "active" : "inactive";
   const seen = new Date(inst.lastActive).toLocaleTimeString();
-  return `  ${inst.id} [${inst.role}] — ${status} (last active: ${seen}, session: ${inst.sessionId.slice(0, 8)})`;
+  // Surface the id <-> tmux-session <-> worktree mapping explicitly: InterComm ids are
+  // assigned in registration order and are DECOUPLED from the tmux session name (a
+  // worker-1 id can live in tmux session worker-4), which makes manual tmux/log
+  // inspection error-prone. tmuxTarget is the routing-truth; worktree (when present)
+  // ties the id to its on-disk checkout + branch.
+  const tmux = inst.tmuxTarget ? `, tmux: ${inst.tmuxTarget}` : "";
+  const wt = worktree
+    ? `, worktree: ${worktree.path}${worktree.branch ? ` @ ${worktree.branch}` : ""}`
+    : "";
+  return `  ${inst.id} [${inst.role}] — ${status} (last active: ${seen}, session: ${inst.sessionId.slice(0, 8)}${tmux}${wt})`;
 };
 
 export const findLowestAvailableWorkerName = (instances: readonly Instance[]): string => {

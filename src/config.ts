@@ -41,3 +41,22 @@ export const worktreesDir = (root: string): string =>
 
 export const worktreePath = (root: string, workerId: string): string =>
   join(worktreesDir(root), workerId);
+
+// Warn when the resolved bus root differs from the launch cwd — the signature of a
+// project nested inside ANOTHER git repo: with no INTERCOMM_DB_ROOT pin, resolveDbRoot
+// falls back to the parent of the git-common-dir, which for a nested checkout is the
+// OUTER repo's root, not this project's. That mis-root makes intercomm_spawn(worktrees)
+// create worktrees of the wrong repo (the Run-1 live-test bug). Pure: returns null when
+// root == cwd. The caller suppresses it when INTERCOMM_DB_ROOT was explicitly set
+// (root != cwd is then intentional, e.g. a pinned shared bus).
+export const rootMismatchWarning = (
+  resolvedRoot: string,
+  cwd: string,
+): string | null => {
+  if (resolve(resolvedRoot) === resolve(cwd)) return null;
+  return (
+    `WARNING: InterComm bus root (${resolvedRoot}) differs from the launch directory (${cwd}). ` +
+    `If this project is nested inside another git repository, spawned worktrees may be created from the WRONG repo. ` +
+    `Pin INTERCOMM_DB_ROOT to the intended project root, or launch from a standalone (non-nested) checkout before spawning.`
+  );
+};

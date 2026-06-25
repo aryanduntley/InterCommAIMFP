@@ -18,7 +18,7 @@ import type {
 } from "./types.js";
 import { WORKTREE_STATUSES } from "./types.js";
 import { buildTaskContract, parseTaskContract } from "./task-contract.js";
-import { worktreePath } from "./config.js";
+import { worktreePath, worktreesDir, rootMismatchWarning, ENV_DB_ROOT } from "./config.js";
 import { loadProtocol } from "./protocol.js";
 import { initDb, closeDb } from "./db.js";
 import { ensureDir } from "./fs-wrapper.js";
@@ -198,7 +198,9 @@ const handleStatus = (state: ServerState): CallToolResult => {
   const lines = [
     `You are: ${myId}`,
     "Instances:",
-    ...instances.map(store.formatInstanceForDisplay),
+    ...instances.map((inst) =>
+      store.formatInstanceForDisplay(inst, store.getWorktree(inst.id)),
+    ),
   ];
   return textResult(lines.join("\n"));
 };
@@ -395,10 +397,16 @@ const handleSpawn = async (
   const lines = reports.map((r) =>
     `session=${r.session} state=${r.state} ready=${r.ready ? "yes" : "no"} woken=${r.woken ? "yes" : "no"} worktree=${r.worktree || "-"}`,
   );
+  // Nested-root guard: if the bus root was NOT explicitly pinned and differs from the
+  // launch cwd, this project may be nested inside another git repo and the worktrees
+  // could be of the wrong repo (Run-1 bug). Surface a warning before the master proceeds.
+  const pinned = process.env[ENV_DB_ROOT]?.trim();
+  const warning = pinned ? null : rootMismatchWarning(state.root, process.cwd());
   return textResult([
-    `Spawned ${reports.length} worker(s):`,
+    ...(warning ? [warning, ""] : []),
+    `Spawned ${reports.length} worker(s) — bus root: ${state.root}${args.worktrees ? `, worktrees under: ${worktreesDir(state.root)}` : ""}`,
     ...lines,
-    "Workers self-register asynchronously — call intercomm_status to confirm the session<->id mapping. Use intercomm_scan/intercomm_approve for any pane left on a dialog.",
+    "Workers self-register asynchronously — call intercomm_status to confirm the session<->id<->worktree mapping. Use intercomm_scan/intercomm_approve for any pane left on a dialog.",
   ].join("\n"));
 };
 
