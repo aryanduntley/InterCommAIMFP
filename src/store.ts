@@ -83,8 +83,30 @@ export const registerInstance = (
   return { id, role, active: true, lastActive: now, registeredAt: now, sessionId, tmuxTarget };
 };
 
-export const touchInstance = (id: string): void => {
-  execute(`UPDATE instances SET last_active = ? WHERE id = ?`, nowMs(), id);
+// Touch last_active on every authenticated tool call. When a non-empty tmuxTarget
+// is supplied (a tmux-backed instance re-resolving its OWN pane), refresh the
+// stored tmux_target in the same write so a moved/renamed pane stays wakeable —
+// this is what keeps the master's wake target fresh for worker escalations
+// (Phase 2.5b P1-b). Off-tmux callers pass '' / nothing and only last_active moves.
+export const touchInstance = (id: string, tmuxTarget?: string): void => {
+  if (tmuxTarget) {
+    execute(
+      `UPDATE instances SET last_active = ?, tmux_target = ? WHERE id = ?`,
+      nowMs(),
+      tmuxTarget,
+      id,
+    );
+  } else {
+    execute(`UPDATE instances SET last_active = ? WHERE id = ?`, nowMs(), id);
+  }
+};
+
+// Unconditionally set (or clear, with '') an instance's stored tmux_target.
+// Distinct from touchInstance's refresh (which ignores '') so a failed escalation
+// wake can DOWNGRADE the master to message-only by clearing a pane that no longer
+// resolves (Phase 2.5b P1-b clear-on-failure).
+export const setInstanceTmuxTarget = (id: string, target: string): void => {
+  execute(`UPDATE instances SET tmux_target = ? WHERE id = ?`, target, id);
 };
 
 export const deactivateInstance = (id: string): void => {

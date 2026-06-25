@@ -1,7 +1,7 @@
-// MCP server — 18 tool handlers (register + communication + management +
+// MCP server — 19 tool handlers (register + communication + management +
 // get_protocol + worktrees + orchestration: spawn/wake/scan/approve/teardown +
-// assign). The coordination protocol is auto-injected via the `instructions`
-// field at construction. Auto-init DB at server startup.
+// assign + escalate). The coordination protocol is auto-injected via the
+// `instructions` field at construction. Auto-init DB at server startup.
 
 import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -54,7 +54,11 @@ const errorResult = (text: string): CallToolResult => ({
 
 const requireIdentity = (state: ServerState): CallToolResult | null => {
   if (!state.identity) return errorResult("Not registered. Call intercomm_register first.");
-  store.touchInstance(state.identity.id);
+  // Refresh last_active AND (when tmux-backed) re-resolve our OWN pane so the stored
+  // tmux_target never goes stale — this keeps the master wakeable for worker
+  // escalations (Phase 2.5b P1-b). currentPaneTarget() returns '' off-tmux, in which
+  // case touchInstance leaves tmux_target untouched.
+  store.touchInstance(state.identity.id, tmux.currentPaneTarget());
   return null;
 };
 
@@ -424,6 +428,52 @@ const handleWake = async (
   return textResult(`Woke ${args.worker} (${res.target}).`);
 };
 
+// Worker -> master no-poll escalation (Phase 2.5b, Option B): the server persists
+// the question to the bus AND does the tmux wake on the worker's behalf — the worker
+// never touches tmux, so role enforcement stays intact. The DB write is the source of
+// truth; the wake is best-effort, so a busy / off-tmux / stale master still recovers
+// the escalation on its next intercomm_read. Returns a structured {persisted, woke, reason?}.
+const handleEscalate = async (
+  state: ServerState,
+  args: { message: string; kind: "question" | "decision"; needs_user: boolean },
+): Promise<CallToolResult> => {
+  const err = requireIdentity(state);
+  if (err) return err;
+  if (state.identity!.role === "master") {
+    return errorResult("intercomm_escalate is a worker->master tool; the master coordinates with the user directly.");
+  }
+
+  const fromId = state.identity!.id;
+  // Persist FIRST (source of truth). kind + needs_user are encoded in the content so
+  // the record is self-describing even if the wake is missed entirely (P1-a).
+  const tag = `[escalation kind=${args.kind}${args.needs_user ? " needs_user" : ""}]`;
+  store.insertMessage(fromId, "master", "question", `${tag} ${args.message}`);
+
+  const report = (woke: boolean, reason?: string): CallToolResult =>
+    textResult(
+      `${woke ? "Escalation persisted and master woken." : "Escalation persisted (master not woken — it will see the question on its next intercomm_read)."}\n` +
+      `{"persisted": true, "woke": ${woke}${reason ? `, "reason": "${reason}"` : ""}}`,
+    );
+
+  // Degradation (never fail): no live master, or a master that is not in tmux, falls
+  // back to message-only. getActiveMaster already excludes stale (>30s) masters.
+  const master = store.getActiveMaster();
+  if (!master) return report(false, "no active (non-stale) master registered");
+  if (!master.tmuxTarget) return report(false, "master not in tmux (message-only)");
+
+  // Best-effort wake — wakeWorker verifies the pane still resolves (P1-d). A definitive
+  // non-resolve downgrades the master to message-only by clearing its target (P1-b).
+  const wake = await orchestrate.wakeWorker(
+    "master",
+    orchestrate.escalationWakeText(fromId, args.kind, args.needs_user, args.message),
+  );
+  if (!wake.woke) {
+    if (!wake.resolved) store.setInstanceTmuxTarget("master", "");
+    return report(false, wake.resolved ? "wake send failed" : "master pane no longer resolves (downgraded to message-only)");
+  }
+  return report(true);
+};
+
 const handleScan = (
   state: ServerState,
   args: { prefix: string },
@@ -602,6 +652,15 @@ const registerTools = (server: McpServer, state: ServerState): void => {
       message: z.string().describe("Prompt text to type and submit in the worker's Claude TUI"),
     },
   }, (args) => handleWake(state, args as { worker: string; message: string }));
+
+  server.registerTool("intercomm_escalate", {
+    description: "Worker->master no-poll escalation. Raise a question or decision to the master WITHOUT polling: the server persists it as a `question` on the bus AND wakes the master in its tmux pane on your behalf (you never touch tmux). The DB write is the source of truth and the wake is best-effort — a busy, off-tmux, or stale master still sees it on its next intercomm_read. Set needs_user when the master must confer with the human before answering. Returns {persisted, woke, reason?}.",
+    inputSchema: {
+      message: z.string().min(1).describe("Your question, or the decision/approval you need from the master"),
+      kind: z.enum(["question", "decision"]).default("question").describe("question = you need info/an answer; decision = you need the master to choose or approve a course of action"),
+      needs_user: z.boolean().default(false).describe("True if the master must confer with the human user before answering (e.g. scope or policy calls)"),
+    },
+  }, (args) => handleEscalate(state, args as { message: string; kind: "question" | "decision"; needs_user: boolean }));
 
   server.registerTool("intercomm_scan", {
     description: "Master-only. Report each worker pane's state (retires scan-workers.sh): trust/mcp_approval/bypass/blocked/ready/running/idle. Surfaces workers frozen on a permission dialog (which cannot report over the bus).",

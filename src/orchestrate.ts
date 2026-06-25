@@ -117,6 +117,30 @@ export const wakePromptText = (session: string, worktrees: boolean): string => {
   );
 };
 
+// The wake prompt pushed to the MASTER when a worker escalates (worker -> master,
+// the inverse of wakePromptText). The persisted `question` on the bus is the source
+// of truth; this text only nudges the master to DRAIN the bus (so a missed/garbled
+// wake is still recovered), confer with the user when needsUser, then answer + wake
+// the worker. Pure string assembly.
+export const escalationWakeText = (
+  fromId: string,
+  kind: "question" | "decision",
+  needsUser: boolean,
+  message: string,
+): string => {
+  const verb = kind === "decision" ? "needs a DECISION" : "has a QUESTION";
+  const user = needsUser
+    ? " It is flagged needs_user — confer with the USER before answering."
+    : "";
+  return (
+    `InterComm escalation from ${fromId}: it ${verb}. ` +
+    `Call intercomm_read to drain the bus, then reply via ` +
+    `intercomm_send(to: "${fromId}", type: "answer", message: ...) and ` +
+    `intercomm_wake("${fromId}", ...) to resume it.${user} ` +
+    `(Escalated message: ${message})`
+  );
+};
+
 // Resolve a worker id OR a raw tmux target to a tmux target string. A registered
 // instance's stored tmux_target wins; otherwise the input is treated as a session
 // name (covers freshly-spawned workers that have not registered yet). IO: store read.
