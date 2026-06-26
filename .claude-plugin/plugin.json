@@ -1,0 +1,25 @@
+{
+  "name": "intercomm-aimfp",
+  "description": "Local-only multi-instance coordination for Claude Code: one master delegates to tmux-spawned workers in isolated git worktrees, with no-poll worker→master escalation and master-orchestrated semantic-changeset merge. A hard AIMFP addon. 19 MCP tools over a single SQLite bus.",
+  "version": "0.4.0",
+  "author": {
+    "name": "Aryan Duntley"
+  },
+  "homepage": "https://github.com/aryanduntley/intercommAIMFP",
+  "repository": "https://github.com/aryanduntley/intercommAIMFP",
+  "license": "MIT",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "mcp",
+    "multi-agent",
+    "coordination",
+    "tmux",
+    "git-worktree",
+    "aimfp"
+  ],
+  "commands": "./intercomm-plugin/commands",
+  "skills": "./intercomm-plugin/skills",
+  "hooks": "./intercomm-plugin/hooks/hooks.json",
+  "mcpServers": "./intercomm-plugin/.mcp.json"
+}

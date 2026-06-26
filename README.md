@@ -59,6 +59,86 @@ protocol on demand with the `intercomm_get_protocol` tool — useful after a lon
 session compacts context. (`system-prompt.md` in this repo is the single in-repo
 source for that injected text; edit it there and rebuild.)
 
+## Install as a Claude Code plugin
+
+InterComm AIMFP is also packaged as a **Claude Code plugin** (the same model as
+AIMFP). Installing the plugin is the supported one-step distribution path — it
+wires up the MCP server, the slash commands, the setup skill, and the hooks in
+any project, and auto-updates the server. The manual `.mcp.json` install above is
+the **development** path (running your local `dist/`); the plugin is the
+**distribution** path. Use one or the other for a given project, not both, or you
+will get a duplicate `intercomm` server.
+
+Once the package is published to npm and this repo is pushed:
+
+```bash
+# add this repo as a plugin marketplace, then install
+claude plugin marketplace add aryanduntley/intercommAIMFP
+claude plugin install intercomm-aimfp
+```
+
+The plugin's `intercomm-plugin/.mcp.json` runs the server via
+`npx -y -p intercomm-aimfp@latest intercomm-mcp`, so npm compiles the native
+`better-sqlite3` binding for each machine on first run and `@latest` keeps the
+server current — no bundled binaries. It ships:
+
+- **MCP server** — all 19 coordination tools, with the protocol auto-injected via the server's `instructions` field.
+- **Commands** — `/register`, `/spawn`, `/status`, `/teardown`.
+- **Skill** — `intercomm-mode` (a tiny setup bootstrap; the real protocol lives in the injected instructions).
+- **Hooks** — a `SessionStart` note on how to begin coordinating.
+
+> **Requires the AIMFP MCP server.** InterComm AIMFP is a hard AIMFP addon. The
+> plugin does not bundle AIMFP — install it separately (its own plugin or
+> `python3 -m aimfp` in your `.mcp.json`). The master's startup preflight warns if
+> the AIMFP tools are absent.
+
+**Local development / testing (before publishing):**
+
+```bash
+# load the plugin straight from this working tree
+claude --plugin-dir /path/to/intercommAIMFP
+```
+
+### Releasing (versioning + publish)
+
+Bump every embedded version in one step, then commit and push — CI publishes:
+
+```bash
+node dev/bump-version.mjs <X.Y.Z>   # syncs package.json + .claude-plugin/plugin.json
+                                    # + the McpServer version in src/mcp-server.ts,
+                                    # resyncs the lockfile, then runs `npm run build`
+git commit -am "release X.Y.Z" && git push
+```
+
+`.github/workflows/publish.yml` publishes `intercomm-aimfp@X.Y.Z` to npm on push to
+`main` whenever the version is new (idempotent). It needs the repo secret
+`NPM_TOKEN`; see the one-time setup below.
+
+### One-time npm + CI setup
+
+Manual, one-time steps to connect GitHub → npm. After these, `bump → commit →
+push` is the whole release.
+
+1. **npm account + name.** Have an npm account and `npm login`. The package name
+   `intercomm-aimfp` must be free or owned by you (currently unpublished).
+2. **First publish by hand.** CI publishes *updates*, but the package must exist
+   first. Once, from the repo root:
+   ```bash
+   npm install && npm run build && npm publish --access public
+   ```
+   (`--access public` is required the first time for an unscoped public package.)
+3. **Create an npm token.** npm → Account → Access Tokens → Generate → **Automation**
+   type (works in CI without 2FA). Copy it.
+4. **Add it to GitHub.** Repo → Settings → Secrets and variables → Actions → New
+   repository secret → name it **`NPM_TOKEN`**, paste the token.
+
+That is the *entire* GitHub↔npm connection. There is **no separate "worker" to
+create** — the workflow file `.github/workflows/publish.yml` *is* the worker;
+GitHub Actions runs it automatically once it is on `main`. (Actions is enabled by
+default. The native `better-sqlite3` build is skipped in CI via `--ignore-scripts`;
+the published artifact is `dist/` + `system-prompt.md`, and the consumer's
+`npx`/`npm install` compiles the native binding.)
+
 ## Usage
 
 The master spawns and controls workers itself through InterComm's MCP tools — no shell scripts and no manual tmux setup required. (The `scripts/*.sh` helpers remain as a dev-only fallback; see [Dev scripts](#dev-scripts).)

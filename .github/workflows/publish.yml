@@ -1,0 +1,48 @@
+name: Publish to npm
+
+# Mirrors AIMFP's PyPI auto-publish worker, for npm. On every push to main, build
+# the package and publish it to npm IF package.json's version is not already
+# published (idempotent — re-running on an unchanged version is a no-op, so this
+# never fails a build just because nothing changed).
+#
+# Requires the repo secret NPM_TOKEN (an npm automation/publish token for the
+# account that owns the `intercomm-aimfp` package). The FIRST publish must be done
+# once by hand (`npm publish --access public`) to create the package + grant the
+# token access; after that this workflow keeps it current.
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      # --ignore-scripts skips better-sqlite3's native build — only the type
+      # packages are needed to run tsc, and the published artifact ships dist/ +
+      # system-prompt.md (the consumer's npm/npx compiles better-sqlite3 natively
+      # at install time).
+      - name: Install (types only, skip native builds)
+        run: npm install --ignore-scripts
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish if version is new
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "intercomm-aimfp@$VERSION" version >/dev/null 2>&1; then
+            echo "intercomm-aimfp@$VERSION already on npm — nothing to publish."
+          else
+            echo "Publishing intercomm-aimfp@$VERSION..."
+            npm publish --access public
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

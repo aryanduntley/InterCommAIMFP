@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'InterComm AIMFP plugin active (19 MCP tools for multi-instance coordination). To coordinate multiple Claude Code instances, the user picks one master: it calls intercomm_register(role: \"master\") and delegates to tmux-spawned workers; every other instance calls intercomm_register() as a worker. The full master/worker protocol auto-injects via the InterComm MCP instructions field (re-read with intercomm_get_protocol). InterComm AIMFP is a hard AIMFP addon — after registering as master, verify the AIMFP MCP tools are present and warn the user if they are absent.'",
+            "statusMessage": "Loading InterComm coordination context..."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "intercomm": {
+      "command": "npx",
+      "args": ["-y", "-p", "intercomm-aimfp@latest", "intercomm-mcp"]
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "intercomm-aimfp",
+  "owner": {
+    "name": "Aryan Duntley",
+    "url": "https://github.com/aryanduntley"
+  },
+  "description": "InterComm AIMFP — local-only multi-instance coordination for Claude Code (master/worker via tmux + git worktrees), the multi-agent parallelization addon for AIMFP.",
+  "plugins": [
+    {
+      "name": "intercomm-aimfp",
+      "source": "./",
+      "description": "MCP server (19 tools) + slash commands, a setup skill, and hooks for master/worker coordination, worktree isolation, no-poll escalation, and semantic-changeset merge. Requires the AIMFP MCP server.",
+      "category": "development"
+    }
+  ]
+}
