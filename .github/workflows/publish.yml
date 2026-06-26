@@ -1,18 +1,27 @@
 name: Publish to npm
 
-# Mirrors AIMFP's PyPI auto-publish worker, for npm. On every push to main, build
-# the package and publish it to npm IF package.json's version is not already
-# published (idempotent — re-running on an unchanged version is a no-op, so this
-# never fails a build just because nothing changed).
+# Publishes to npm via Trusted Publishing (OIDC) — NO stored token. GitHub Actions
+# authenticates to npm over OIDC, so there is nothing to rotate (classic tokens are
+# deprecated; granular tokens force ≤90-day expiry — OIDC avoids both). Provenance
+# is attached automatically.
 #
-# Requires the repo secret NPM_TOKEN (an npm automation/publish token for the
-# account that owns the `intercomm-aimfp` package). The FIRST publish must be done
-# once by hand (`npm publish --access public`) to create the package + grant the
-# token access; after that this workflow keeps it current.
+# ONE-TIME setup on npm (after the package's first publish exists):
+#   npmjs.com → intercomm-aimfp → Settings → Trusted Publisher → GitHub Actions:
+#     organization/user: aryanduntley
+#     repository:        InterCommAIMFP
+#     workflow:          publish.yml
+#     environment:       (leave blank)
+#
+# On push to main, build and publish IF package.json's version is new (idempotent —
+# re-running on an unchanged version is a no-op).
 
 on:
   push:
     branches: [main]
+
+permissions:
+  contents: read
+  id-token: write # required for OIDC trusted publishing
 
 jobs:
   publish:
@@ -24,6 +33,11 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+
+      # Trusted publishing requires npm >= 11.5.1. Node 24 ships npm 11.x, but pin
+      # latest so this can't silently fall behind the OIDC requirement.
+      - name: Ensure npm supports OIDC trusted publishing
+        run: npm install -g npm@latest
 
       # --ignore-scripts skips better-sqlite3's native build — only the type
       # packages are needed to run tsc, and the published artifact ships dist/ +
@@ -41,8 +55,6 @@ jobs:
           if npm view "intercomm-aimfp@$VERSION" version >/dev/null 2>&1; then
             echo "intercomm-aimfp@$VERSION already on npm — nothing to publish."
           else
-            echo "Publishing intercomm-aimfp@$VERSION..."
-            npm publish --access public
+            echo "Publishing intercomm-aimfp@$VERSION via OIDC trusted publishing..."
+            npm publish
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

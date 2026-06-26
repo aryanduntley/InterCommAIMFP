@@ -99,46 +99,6 @@ server current — no bundled binaries. It ships:
 claude --plugin-dir /path/to/intercommAIMFP
 ```
 
-### Releasing (versioning + publish)
-
-Bump every embedded version in one step, then commit and push — CI publishes:
-
-```bash
-node dev/bump-version.mjs <X.Y.Z>   # syncs package.json + .claude-plugin/plugin.json
-                                    # + the McpServer version in src/mcp-server.ts,
-                                    # resyncs the lockfile, then runs `npm run build`
-git commit -am "release X.Y.Z" && git push
-```
-
-`.github/workflows/publish.yml` publishes `intercomm-aimfp@X.Y.Z` to npm on push to
-`main` whenever the version is new (idempotent). It needs the repo secret
-`NPM_TOKEN`; see the one-time setup below.
-
-### One-time npm + CI setup
-
-Manual, one-time steps to connect GitHub → npm. After these, `bump → commit →
-push` is the whole release.
-
-1. **npm account + name.** Have an npm account and `npm login`. The package name
-   `intercomm-aimfp` must be free or owned by you (currently unpublished).
-2. **First publish by hand.** CI publishes *updates*, but the package must exist
-   first. Once, from the repo root:
-   ```bash
-   npm install && npm run build && npm publish --access public
-   ```
-   (`--access public` is required the first time for an unscoped public package.)
-3. **Create an npm token.** npm → Account → Access Tokens → Generate → **Automation**
-   type (works in CI without 2FA). Copy it.
-4. **Add it to GitHub.** Repo → Settings → Secrets and variables → Actions → New
-   repository secret → name it **`NPM_TOKEN`**, paste the token.
-
-That is the *entire* GitHub↔npm connection. There is **no separate "worker" to
-create** — the workflow file `.github/workflows/publish.yml` *is* the worker;
-GitHub Actions runs it automatically once it is on `main`. (Actions is enabled by
-default. The native `better-sqlite3` build is skipped in CI via `--ignore-scripts`;
-the published artifact is `dist/` + `system-prompt.md`, and the consumer's
-`npx`/`npm install` compiles the native binding.)
-
 ## Usage
 
 The master spawns and controls workers itself through InterComm's MCP tools — no shell scripts and no manual tmux setup required. (The `scripts/*.sh` helpers remain as a dev-only fallback; see [Dev scripts](#dev-scripts).)

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bump InterComm AIMFP version across ALL files that embed a version, then build.
-// Mirrors AIMFP's dev/bump-version.py (which bumps pyproject + __init__ + the
-// server-code SERVER_VERSION + plugin.json, then rebuilds).
+// Mirrors AIMFP's dev/bump-version.py (interactive: shows current versions, then
+// prompts for the new one — no need to open any file to check where it's at).
 //
 // Files kept in sync:
 //   - package.json                ("version": "X.Y.Z")   ← the npm package version
@@ -12,27 +12,23 @@
 //                                                           `npm ci` cannot fail on drift
 //
 // Second part (mirrors AIMFP's rebuild): runs `npm run build` (tsc) so dist/ —
-// which is what the published package ships — carries the new server version.
+// what the published package ships — carries the new server version.
 //
-// IMPORTANT — bumping + building locally is NOT the full release:
-//   * The plugin's intercomm-plugin/.mcp.json runs `npx -y -p intercomm-aimfp@latest
-//     intercomm-mcp`, so users get the new SERVER only once the npm package is
-//     PUBLISHED. CI (.github/workflows/publish.yml) publishes on push to main when
-//     package.json's version is new.
-//   * Users get the new plugin METADATA (commands/skill/hooks/version) only after
-//     the repo is PUSHED (the marketplace source is this repo).
-//   Full release = bump → commit → push. CI does the npm publish.
-//
-// Usage: node dev/bump-version.mjs <X.Y.Z> [--no-build]
+// Usage:
+//   node dev/bump-version.mjs              # interactive: prints current, then prompts
+//   node dev/bump-version.mjs <X.Y.Z>      # non-interactive (CI/scripts)
+//   add --no-build to skip the rebuild
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
+import { createInterface } from "node:readline/promises";
+import { stdin, stdout } from "node:process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-// Per-file match patterns. Each pattern is (prefix-up-to-opening-quote)(value)(closing-quote)
+// Per-file match patterns. Each is (prefix-up-to-opening-quote)(value)(closing-quote)
 // via groups 1 and 2, so the value is everything between them — this avoids the
 // classic bug of matching the `"version"` KEY instead of its value.
 const FILES = [
@@ -70,13 +66,14 @@ const writeVersion = (f, v) => {
   return true;
 };
 
-const args = process.argv.slice(2);
-const newVersion = args.find((a) => !a.startsWith("--"));
-const noBuild = args.includes("--no-build");
+const die = (msg, code = 1) => {
+  console.error(msg);
+  process.exit(code);
+};
 
+// ---- show current versions + sync check -------------------------------------
 console.log("InterComm AIMFP Version Bumper");
 console.log("=".repeat(40));
-
 console.log("\nCurrent versions:");
 const found = FILES.map((f) => {
   const v = readVersion(f);
@@ -84,18 +81,34 @@ const found = FILES.map((f) => {
   return v;
 });
 const unique = [...new Set(found.filter(Boolean))];
+const current = unique.length === 1 ? unique[0] : null;
 if (unique.length > 1) console.log("\n  WARNING: versions are out of sync!");
-else if (unique.length === 1) console.log(`\n  All files at: ${unique[0]}`);
+else if (current) console.log(`\n  All files at: ${current}`);
 
-if (!newVersion) {
-  console.log("\nUsage: node dev/bump-version.mjs <X.Y.Z> [--no-build]");
-  process.exit(0);
-}
-if (!VERSION_RE.test(newVersion)) {
-  console.error(`\nInvalid version format: '${newVersion}' (expected X.Y.Z)`);
-  process.exit(1);
+// ---- decide the new version (argv = non-interactive, else prompt) ------------
+const args = process.argv.slice(2);
+let newVersion = args.find((a) => !a.startsWith("--"));
+const noBuild = args.includes("--no-build");
+let runBuild = !noBuild;
+
+if (newVersion) {
+  if (!VERSION_RE.test(newVersion)) die(`\nInvalid version format: '${newVersion}' (expected X.Y.Z)`);
+} else {
+  const rl = createInterface({ input: stdin, output: stdout });
+  const ans = (await rl.question(`\nNew version${current ? ` (current ${current})` : ""} — or 'q' to quit: `)).trim();
+  if (!ans || ans.toLowerCase() === "q") { rl.close(); console.log("Aborted."); process.exit(0); }
+  if (!VERSION_RE.test(ans)) { rl.close(); die(`Invalid version format: '${ans}' (expected X.Y.Z)`); }
+  newVersion = ans;
+  const confirm = (await rl.question(`Update all files to ${newVersion}? [y/N]: `)).trim().toLowerCase();
+  if (confirm !== "y" && confirm !== "yes") { rl.close(); console.log("Aborted."); process.exit(0); }
+  if (!noBuild) {
+    const b = (await rl.question("Run build after bumping? [Y/n]: ")).trim().toLowerCase();
+    runBuild = b !== "n" && b !== "no";
+  }
+  rl.close();
 }
 
+// ---- apply --------------------------------------------------------------------
 console.log(`\nUpdating all files to: ${newVersion}`);
 for (const f of FILES) {
   const ok = writeVersion(f, newVersion);
@@ -111,8 +124,8 @@ try {
   console.log("  (could not resync lockfile automatically — run `npm install` once)");
 }
 
-if (noBuild) {
-  console.log("\nSkipped build (--no-build). Remember: commit & push so CI publishes to npm.");
+if (!runBuild) {
+  console.log("\nSkipped build. Remember: commit & push so CI publishes to npm.");
   process.exit(0);
 }
 
