@@ -2,7 +2,7 @@
 
 Local-only coordination system for multiple Claude Code instances working on the same project. One instance is master, the rest are workers. The master delegates tasks and controls workers via tmux. All state lives in a single SQLite database — no servers, no HTTP, no sockets.
 
-**Requires tmux** and the **AIMFP MCP server**. InterComm AIMFP is a hard AIMFP addon — the worker flow runs `aimfp_run` and `git_create_branch`, and the master integrates each branch via `export_state_changeset` / `apply_state_changeset`. Without the AIMFP MCP server connected (listed in the project's `.mcp.json`), instances can still coordinate and isolate files via worktrees, but there is **no AIMFP tracking and no semantic-changeset merge**. (InterComm's own code stays AIMFP-agnostic — it never reads AIMFP's DB.)
+**Requires tmux** and the **AIMFP MCP server**. InterComm AIMFP is a hard AIMFP addon — the worker flow runs `aimfp_run` and `git_create_branch`, and the master integrates each branch via AIMFP's `merge_worker_branch` bridge (over `export_state_changeset` / `apply_state_changeset`). Without the AIMFP MCP server connected (listed in the project's `.mcp.json`), instances can still coordinate and isolate files via worktrees, but there is **no AIMFP tracking and no semantic-changeset merge**. (InterComm's own code stays AIMFP-agnostic — it never reads AIMFP's DB.)
 
 ## How It Works
 
@@ -185,12 +185,19 @@ The master does **not** ship prose instructions to a worker. It ships a small JS
 
 ## Integration
 
-When a worker reports `done`, the master integrates its branch — **source and AIMFP DB state are merged by different mechanisms**:
+When a worker reports `done`, the master integrates its branch — **source and AIMFP DB state are merged by different mechanisms** (the binary `project.db` is **never** git-merged). AIMFP ships an InterComm-gated bridge that does this in one call:
 
-1. **Text-merge the worker's source** into `main` (normal code review / conflict resolution). The binary `project.db` is **never** git-merged.
-2. **Export the worker's DB tracking** as a semantic changeset: AIMFP `export_state_changeset(base_main_commit, branch)` — an integer-free diff keyed on stable semantic keys.
-3. **Apply it onto main**: AIMFP `apply_state_changeset(changeset)` — a 3-way merge that auto-applies non-overlapping changes, mints canonical IDs, rewrites references, and reports conflicts for the master to resolve.
-4. **Commit** merged source + updated `project.db` to main; move to the next branch.
+```
+merge_worker_branch(branch, base_commit?, worker_id?, source?, on_conflict?)
+```
+
+It exports the worker's committed changeset (persisted server-side), text-merges its source into `main` (`source: "auto"`), and 3-way semantic-applies the changeset onto `main`'s `project.db` — auto-applying non-overlapping changes, minting canonical IDs, rewriting references. The **changeset never crosses the agent boundary**. It returns the small result for the master to act on:
+
+- `data.conflicts` (DB) and `data.source_merge.conflicts` (code) — structured, **never guessed**.
+- `data.backup_path` — pre-apply `project.db` snapshot.
+- `data.{worker_id, branch, status}` — the master forwards this to `intercomm_worktree_set_status` (AIMFP never writes InterComm's DB).
+
+The source merge is left **uncommitted**: resolve conflicts, then commit source + `project.db` to `main` and move on. Batch with `merge_worker_branches(branches[], order?, on_conflict?)`. Plan ahead with `verify_fanout_ready()` / `plan_disjoint_partitions()` (before spawning), and `summarize_state_changeset` / `detect_state_conflicts` / `get_merge_history` (while sequencing the queue). The manual `export_state_changeset` → `apply_state_changeset` path still exists as the underlying mechanism (now passing a `changeset_id` handle instead of the full object) for debugging.
 
 InterComm only **tracks** the lifecycle (`intercomm_worktree_list` is the master's merge-queue view); the DB merge intelligence lives entirely in AIMFP.
 

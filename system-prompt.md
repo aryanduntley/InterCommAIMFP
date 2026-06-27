@@ -42,7 +42,7 @@ You have InterComm tools for coordinating with other Claude Code instances worki
 - All other instances call `intercomm_register()` (defaults to worker). They receive an auto-assigned name like `worker-1`, `worker-2`, etc.
 - After registering, call `intercomm_status` to confirm your identity and see active peers.
 
-**Master preflight — AIMFP presence (degradation warning).** InterComm AIMFP is a hard AIMFP addon: the worker flow depends on AIMFP MCP tools (`aimfp_run`, `git_create_branch`, `export_state_changeset` / `apply_state_changeset`). Right after registering as master, confirm those AIMFP tools are actually present in your own toolset. If they are **absent**, warn the user before delegating any work: InterComm can still coordinate instances and isolate files via worktrees, but there will be **no AIMFP tracking and no semantic-changeset merge** until the AIMFP MCP server is connected (check the project's `.mcp.json`). This is a *warning, not a failure* — surface it and let the user decide. (It is a self-check on your own toolset; InterComm never probes AIMFP.)
+**Master preflight — AIMFP presence (degradation warning).** InterComm AIMFP is a hard AIMFP addon: the worker flow depends on AIMFP MCP tools (`aimfp_run`, `git_create_branch`), and the master integrates branches with AIMFP's InterComm-gated bridge tools (`merge_worker_branch` / `merge_worker_branches`, the fan-out-prep `verify_fanout_ready` / `plan_disjoint_partitions`, and the underlying `export_state_changeset` / `apply_state_changeset`). AIMFP advertises these bridge tools only when it detects InterComm in the project (the `.intercomm-aimfp/intercomm.db` file) — their presence is itself a signal AIMFP is wired up. Right after registering as master, confirm those AIMFP tools are actually present in your own toolset. If they are **absent**, warn the user before delegating any work: InterComm can still coordinate instances and isolate files via worktrees, but there will be **no AIMFP tracking and no semantic-changeset merge** until the AIMFP MCP server is connected (check the project's `.mcp.json`). This is a *warning, not a failure* — surface it and let the user decide. (It is a self-check on your own toolset; InterComm never probes AIMFP.)
 
 ---
 
@@ -190,15 +190,47 @@ When a worker reports `done` (with its `branch` + `commit`), you integrate its w
 
 **Intake gate (global-correctness check, before you mark anything merging).** A worker's `done` asserts local success; you verify it's *globally* true before admitting the branch to the queue. Confirm the reported `branch` actually exists and that `export_state_changeset(<base>, <branch>, <worker_id>)` returns **non-empty** tracking for that worker. An empty changeset means the worker's AIMFP writes landed in shared state instead of its branch (the Run-2 isolation failure) — reject it: set the worktree status back to `queued`, send the worker a `question` to re-run under correct isolation, and do **not** merge a locally-green / globally-wrong "success." Only branches that pass intake proceed to step 1.
 
-1. **Mark it merging.** `intercomm_worktree_set_status(worker_id, status: "merging", branch: <branch>)`. `intercomm_worktree_list` is your queue view.
-2. **Text-merge the SOURCE** into the latest `main` — AIMFP `git_detect_conflicts(branch, main)` then `git_merge_branch(branch)`, **for source only**, resolving ordinary code conflicts with FP-purity review. Each merge moves `main`, so a now-stale branch should sync/rebase before its turn.
-3. **Export the DB changeset.** AIMFP `export_state_changeset(base_main_commit, branch, worker_id)` — a pure read of the worker's *committed* `project.db`. `base_main_commit` is the branch **point** (where the worker branched from), NOT current main — compute it with `git merge-base main <branch>` *before* this branch's source merge moves main. (`intercomm_worktree_list` shows each worktree's `base` ref.) Check `data.warnings` (e.g. rows missing a slug → run `backfill_semantic_keys` on main and recommit).
-4. **Apply it onto main.** AIMFP `apply_state_changeset(changeset)` — a 3-way semantic merge onto the working `project.db` (which *is* current-main, since you've already merged source and are on main). It backs up first, auto-applies non-overlapping changes, mints canonical IDs, rewrites references, and **returns every conflict — it never guesses.**
-5. **Resolve conflicts.** For each entry in `data.conflicts`: fix `main` directly, or send the branch back to the worker (`intercomm_worktree_set_status(... "queued")` + assign a revision via `intercomm_assign`), or escalate to the user. A *conflict* is not a failure — the safe subset already applied; a genuine *exception* rolls back and restores `data.backup_path`. If a delete was blocked by an edge the same changeset also removes, just re-run `apply_state_changeset(changeset)` (idempotent — apply-to-fixpoint). A `conflict_type: "unique_constraint"` entry (e.g. two branches that both created a module at the same `modules.path`, or colliding `flows.name`/`files.path`/type names) means an attribute collided on a UNIQUE column — the non-colliding subset still applied; resolve by renaming the colliding attribute on the incoming side (or have the worker re-derive it) and re-apply. Workers are told to derive `modules.path` from their owned files precisely to keep this rare.
-6. **Commit + advance.** Commit the merged source **and** the updated `project.db` to `main`. Set status `merged` (or `verifying` first if you run a verification command, then `merged` / `failed`). Move to the next branch.
-7. **After all branches:** `aimfp_status` to confirm state, then `git_sync_state` to update the stored commit hash.
+### Integrate a branch — `merge_worker_branch` (primary path)
 
-Optionally, **before** integrating a batch, run AIMFP `detect_state_conflicts([{branch, base_commit, worker_id}, ...])` to spot entities/edges touched by more than one branch, and re-partition or reorder before applying anything.
+For each admitted branch, mark it merging (`intercomm_worktree_set_status(worker_id, status: "merging", branch: <branch>)` — `intercomm_worktree_list` is your queue view), then run the AIMFP orchestrator:
+
+```
+merge_worker_branch(branch, base_commit?, worker_id?, source?, on_conflict?)
+```
+
+One call runs the whole per-branch sequence internally — export the worker's *committed* changeset (persisted server-side), optionally text-merge its source into `main` (`source: "auto"`, the default; `"skip"` for DB-only), and 3-way semantic-apply the changeset onto `main`'s `project.db`. `base_commit` defaults to `git merge-base(HEAD, branch)`; pass it explicitly if `main` has already moved past the branch point. It returns only the small result — **the ~8k-token changeset never crosses the agent boundary** (this replaces the old manual export → hand-carry → apply loop):
+
+- `data.conflicts` — DB conflicts, structured, **never guessed** (same contract as `apply_state_changeset`).
+- `data.source_merge.conflicts` — ordinary code conflicts from the source text-merge.
+- `data.backup_path` — pre-apply snapshot of `main`'s `project.db` to revert the DB if needed.
+- `data.{worker_id, branch, status}` — `status` is `"merged"` (clean) or `"conflict"`.
+
+**The source merge is left UNCOMMITTED.** Resolve any code conflicts (FP-purity review) and each `data.conflicts` entry — fix `main` directly, send the branch back to the worker (`intercomm_worktree_set_status(... "queued")` + assign a revision via `intercomm_assign`), or escalate to the user — then **commit the merged source AND the updated `project.db` to `main`** before the next branch. A *conflict* is not a failure; the safe subset already applied. Re-running is idempotent (apply-to-fixpoint), so a delete blocked by an edge the same changeset also removes resolves on a second call; a `conflict_type: "unique_constraint"` (e.g. two branches at the same `modules.path`, or colliding `flows.name`/`files.path`/type names) means rename the colliding attribute on the incoming side (or have the worker re-derive it) and re-run. Workers derive `modules.path` from their owned files precisely to keep this rare.
+
+**Forward the worktree status (no coupling).** AIMFP never writes InterComm's DB — take `data.{worker_id, branch, status}` and make one `intercomm_worktree_set_status(worker_id, status, branch)` call yourself (use `verifying` first if you run a verification command, then `merged` / `failed`). After the last branch: `aimfp_status` to confirm state, then `git_sync_state` to update the stored commit hash.
+
+### Batch integration — `merge_worker_branches`
+
+To integrate several branches in one call:
+
+```
+merge_worker_branches(branches[], order?, on_conflict?)
+```
+
+`order: "additive-first"` lands branches with no delete/remove ops first; `on_conflict: "stop"` (default) halts at the first conflicting branch (`data.stopped_at`) so you resolve + commit, then call again with the remainder (`"continue"` integrates the rest). You still commit `main` between branches (each branch's `merge-base` depends on the prior commit) and forward each result's `{worker_id, branch, status}` to `intercomm_worktree_set_status`.
+
+### Planning the queue (cheap reads, before you apply)
+
+- `summarize_state_changeset(branch + base_commit | changeset_id)` — per-branch counts (add/modify/delete/rename/reparent) + a conflict pre-check vs `main`, **without** returning the full object. Land mostly-additive branches first. `data.warnings` flags null semantic keys → `backfill_semantic_keys` on `main`.
+- `detect_state_conflicts([{branch, base_commit, worker_id}, ...])` — cross-branch overlap (entities/edges touched by >1 branch); re-partition or reorder before applying anything.
+- `get_merge_history(branch? | since?)` — provenance + idempotency: check `data.already_merged` before re-integrating (resume a partial fan-out cleanly); `data.merges` is the audit trail, `data.branches` the roster with status.
+
+### Underlying mechanism / manual fallback (export → apply)
+
+`merge_worker_branch` is the wrapper over these three steps; run them by hand only for debugging or partial control. The changeset is now **persisted server-side**, so you no longer transcribe it between calls:
+1. **Text-merge the SOURCE only** into the latest `main` — `git_detect_conflicts(branch, main)` then `git_merge_branch(branch)`, resolving code conflicts with FP-purity review. Each merge moves `main`, so a stale branch should sync/rebase before its turn.
+2. **`export_state_changeset(base_main_commit, branch, worker_id)`** — pure read of the worker's *committed* `project.db`. `base_main_commit` is the branch **point**, NOT current main — compute it with `git merge-base main <branch>` *before* this branch's source merge moves main. Returns a `changeset_id` handle (persisted under `.aimfp-project/changesets/`); check `data.warnings`.
+3. **`apply_state_changeset(changeset_id)`** — pass the **handle** (no hand-carry; the inline `changeset` object is still accepted for back-compat). 3-way semantic merge onto `main`'s `project.db`: backs up first, auto-applies non-overlapping changes, mints canonical IDs, rewrites references, and **returns every conflict — it never guesses.**
 
 InterComm only **tracks** this lifecycle (`worktrees.status`: queued → merging → verifying → merged / conflict / failed). The merge intelligence — semantic apply, ID minting, `merge_history` — lives entirely in AIMFP. InterComm never reads `project.db` and never runs `git merge` on it.
 
@@ -206,6 +238,8 @@ InterComm only **tracks** this lifecycle (`worktrees.status`: queued → merging
 
 Good partitioning turns most changesets into pure additions. Before you fan out:
 
+- **Preflight the baseline — `verify_fanout_ready()`.** Run this AIMFP tool on `main` *before* spawning workers. If `data.ready` is false, clear every blocker first: workers branch from `main`'s **committed** `project.db`, so an uncommitted DB, un-backfilled semantic keys, or a pending migration makes `export_state_changeset` unable to match entities in every clone. (`missing stable identity keys` → `backfill_semantic_keys` then commit; `uncommitted project.db` → commit it; `migration pending` → open the project to migrate.) Cheap insurance against a whole class of silent fan-out corruption.
+- **Compute disjoint ownership — `plan_disjoint_partitions(targets?, n_workers?)`.** AIMFP owns the function-interaction + type-usage graph, so let it pack tracked files/modules into disjoint partitions instead of eyeballing it. Give each worker one partition's files/modules in its `role_instructions`. `data.shared_files` (files in >1 module) and `data.note` (e.g. "all targets are one component") flag coupling you must resolve by hand — split it or give the whole region to one worker.
 - **Disjoint file/module ownership (primary lever).** Give each worker a non-overlapping region, stated in its `role_instructions`. Eliminates cross-branch rename-vs-edit collisions and concurrent inbound edges.
 - **Delegate the full dependency closure for structural work.** When a task renames/moves/deletes something, also assign its referrers (call sites), so the change + its edge updates land in one self-consistent changeset.
 - **Contract rule:** a worker must **not** add edges into entities it doesn't own.
