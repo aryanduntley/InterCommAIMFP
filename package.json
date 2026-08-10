@@ -1,6 +1,6 @@
 {
   "name": "intercomm-aimfp",
-  "version": "0.5.3",
+  "version": "1.0.1",
   "description": "Local intercommunication system for coordinating multiple Claude Code instances via SQLite",
   "type": "module",
   "main": "dist/cli.js",
@@ -33,7 +33,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "better-sqlite3": "^12.6.2",
     "zod": "^4.3.6"
   }
