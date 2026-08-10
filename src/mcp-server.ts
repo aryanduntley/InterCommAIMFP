@@ -699,7 +699,7 @@ export const createAndRunServer = async (root: string): Promise<void> => {
   // AIMFP uses for its rules) — no per-project CLAUDE.md embedding or paste.
   const server = new McpServer({
     name: "intercomm-aimfp",
-    version: "1.0.1",
+    version: "1.0.2",
   }, {
     instructions: loadProtocol(),
   });
